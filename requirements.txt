@@ -1,0 +1,23 @@
+# 文档批量转 Markdown（doc2md）—— 直接依赖
+#
+# 版本为本机实测通过的组合（Python 3.13 / Windows 11）。
+# 安装：
+#     python -m venv .venv
+#     .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# ---- 文档解析 ----
+pymupdf==1.28.2          # PDF 渲染 / 文本层抽取
+pymupdf4llm==1.28.2      # 有文本层 PDF → Markdown
+mammoth==1.12.2          # .docx → HTML
+markdownify==1.2.3       # HTML → Markdown
+openpyxl==3.1.5          # .xlsx
+xlrd==2.0.2              # 老式 .xls
+
+# ---- 云端 OCR / HTTP ----
+requests==2.34.2
+
+# ---- 实时监控 ----
+watchdog==6.0.0
+
+# ---- 仅 Windows：.doc / .xls 走 Office COM 时需要 ----
+pywin32==312; sys_platform == "win32"

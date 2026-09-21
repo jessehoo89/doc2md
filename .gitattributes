@@ -1,0 +1,21 @@
+# 换行符归一化：仓库内统一 LF 存储，检出时按文件类型给正确的行尾。
+# .bat 必须用 CRLF —— 里面有 goto 标签，LF-only 的批处理在部分 cmd 上会解析错。
+
+* text=auto eol=lf
+
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+*.py    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+
+# 二进制，别动
+*.db    binary
+*.png   binary
+*.jpg   binary
+*.pdf   binary

@@ -4,7 +4,13 @@ from pathlib import Path
 
 # 仓库根 = 本包的上一级。config.json / .env / state.db / logs 都在那里，
 # 所以从任何位置调用本模块，工作目录都应当先切到这里。
-_ROOT = Path(__file__).resolve().parent.parent
+# PyInstaller 打包后（sys.frozen=True）__file__ 位于一次性解包目录，必须改用
+# exe 所在目录，否则配置/状态库会落在临时目录里、退出即丢。
+_ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent.parent
+)
 
 
 def _hint(exc: BaseException) -> None:

@@ -1,6 +1,9 @@
 """交互式启动器：双击 bat 后显示中文菜单，选择要执行的操作。
 
 .bat 只含纯 ASCII，中文提示全部由本脚本输出，避免 cmd 代码页乱码。
+
+菜单项 G 会切到图形界面（gui.py），两者共用同一套核心，功能完全一样；
+图形界面需要带 tkinter 的解释器 —— 项目根的 .venv-gui 就是为此准备的。
 """
 from __future__ import annotations
 
@@ -9,7 +12,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-TOOL_DIR = Path(__file__).resolve().parent
+TOOL_DIR = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)     # 打包后：exe 所在目录（config.json/.env 就在旁边）
+    else Path(__file__).resolve().parent
+)
 sys.path.insert(0, str(TOOL_DIR))
 
 MENU = """
@@ -20,6 +27,7 @@ MENU = """
   扫描件（无文字层）自动调用 PaddleOCR 云端识别
   敏感目录（个人资料等）已配置为不上传云端
 
+    [G]  打开图形界面 ⭐         窗口版操作界面（按钮点选，功能与本菜单完全一样）
     [1]  扫描 / 试运行          看看有多少文件、走哪条通道（不写任何文件）
     [2]  开始批量转换            全量转换，中断后重跑会自动续传
     [3]  启动实时监控            常驻监控新增和修改的文件，自动转换
@@ -76,11 +84,31 @@ def _open_credentials() -> None:
 
 
 def _run(args: list[str], *, pause: bool = True) -> None:
+    """执行一个子命令。
+
+    源码运行时起独立子进程（干净、Ctrl+C 不会带走菜单）。
+    **打包后必须改为同进程直接调用**：那时 sys.executable 就是本 exe 自己，
+    再拼 `[exe, "-m", "doc2md", ...]` 会变成无限自我递归。
+    """
+    print()
+    if getattr(sys, "frozen", False):
+        try:
+            from doc2md.cli import main as cli_main
+
+            cli_main(args)
+        except KeyboardInterrupt:
+            print("\n已中断。")
+            return
+        except SystemExit:
+            pass
+        if pause:
+            input("\n按回车返回菜单…")
+        return
+
     cmd = [sys.executable, "-m", "doc2md", *args]
     env = dict(os.environ)
     env["PYTHONPATH"] = str(TOOL_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONIOENCODING"] = "utf-8"
-    print()
     try:
         subprocess.run(cmd, cwd=str(TOOL_DIR), env=env, check=False)
     except KeyboardInterrupt:
@@ -106,6 +134,34 @@ def _open_path(p: Path, *, editor_fallback: bool = False) -> None:
     subprocess.run(["cmd", "/c", "start", "", str(p)], check=False)
 
 
+def _open_gui() -> None:
+    """切到图形界面（同一个进程内起 Tk 主循环，退出后回到菜单）。
+
+    这里要单独判一次 tkinter：本机的 WorkBuddy 托管 Python 是精简版，**没有
+    tkinter**，直接 import 会抛 ModuleNotFoundError。与其让用户看到一个
+    traceback，不如明确告诉他该用哪个解释器。
+    """
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        print("\n[错误] 当前 Python 解释器没有 tkinter，无法打开图形界面。")
+        print(f"       当前解释器：{sys.executable}")
+        print("       请改用带 tkinter 的解释器（项目根下的 .venv-gui 就是）：")
+        print(f'         "{TOOL_DIR}\\.venv-gui\\Scripts\\python.exe" gui.py')
+        print("       或者直接双击 文档转MD-GUI.bat，它自己会挑对解释器。")
+        input("\n按回车返回菜单…")
+        return
+    print("\n正在打开图形界面…关闭窗口即可返回本菜单。")
+    try:
+        from gui import main as gui_main
+
+        gui_main()
+    except Exception as e:
+        print(f"\n[错误] 图形界面启动失败：{type(e).__name__}: {e}")
+        print("       可以改用菜单项 1-9 继续操作，功能完全一样。")
+        input("\n按回车返回菜单…")
+
+
 def main() -> int:
     while True:
         os.system("cls" if os.name == "nt" else "clear")
@@ -116,7 +172,9 @@ def main() -> int:
             print()
             return 0
 
-        if choice == "1":
+        if choice in ("g", "G"):
+            _open_gui()
+        elif choice == "1":
             _run(["scan"])
         elif choice == "2":
             _run(["run"])
@@ -141,7 +199,7 @@ def main() -> int:
             print("\n再见。")
             return 0
         else:
-            print("\n[提示] 请输入 0-9 之间的序号。")
+            print("\n[提示] 请输入 0-9 之间的序号，或 G 打开图形界面。")
             input("按回车继续…")
     return 0
 

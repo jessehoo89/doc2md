@@ -4,13 +4,30 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 PKG_DIR = Path(__file__).resolve().parent
-TOOL_DIR = PKG_DIR.parent
+
+
+def _program_dir() -> Path:
+    """程序根目录：config.json / .env / state.db / logs 都放在这里。
+
+    源码运行时它就是仓库根（本包的上一级）。
+    **PyInstaller 打包后必须改用 exe 所在目录** —— 此时 `__file__` 指向
+    `sys._MEIPASS` 这个一次性解包目录，退出即删：若沿用它，config.json、
+    .env 会在每次启动时"丢失"，而 state.db 每次运行都从空开始，
+    断点续传与失败重试会彻底失效（且现场看不出来，只是每次都全量重转）。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return PKG_DIR.parent
+
+
+TOOL_DIR = _program_dir()
 DEFAULT_CONFIG = TOOL_DIR / "config.json"
 
 # 各后端类型的默认服务地址。type 与 ocr 段本身不同时用它兜底，
@@ -425,27 +442,43 @@ def resolve_config_path(path: str | Path | None = None) -> Path:
     return Path(path) if path else DEFAULT_CONFIG
 
 
+def bundled_dir() -> Path:
+    """内置资源目录（config.example.json 这类随程序发布的文件）。
+
+    源码运行 = 程序目录；PyInstaller 打包后 = 解包目录（onedir 布局下即
+    `_internal/`）。spec 里 datas 的目标是相对解包目录的，所以打包后示例配置
+    **不会**出现在 exe 旁边 —— 找它时必须来这里找。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    return Path(meipass) if meipass else TOOL_DIR
+
+
 def bootstrap_config(path: str | Path | None = None) -> Path | None:
-    """首次运行时用同目录的 config.example.json 生成 config.json。
+    """首次运行时用 config.example.json 生成 config.json。
 
     仓库里**只提交示例配置**（不含任何个人目录与凭据），真实的 config.json /
     .env / state.db 一律在 .gitignore 里。这样 clone 下来不缺配置、双击 bat 就能
     跑，也不会把别人的路径与 Token 带进版本库。
+
+    示例配置按顺序找：**exe / 仓库旁边的** → **打包时内置的**。打包后示例被放进
+    `_internal/`，若只看第一个位置，exe 首次运行会以"配置文件不存在"直接退出。
 
     返回实际生成的文件路径；没有生成则返回 None。
     """
     p = resolve_config_path(path)
     if p.exists() or p.name != "config.json":
         return None
-    example = p.with_name("config.example.json")
-    if not example.exists():
-        return None
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(example, p)
-    except OSError:
-        return None
-    return p
+    for example in (p.with_name("config.example.json"),
+                    bundled_dir() / "config.example.json"):
+        if not example.exists():
+            continue
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(example, p)
+        except OSError:
+            return None
+        return p
+    return None
 
 
 def load_config(path: str | Path | None = None) -> Config:

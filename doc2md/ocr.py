@@ -396,7 +396,7 @@ class PaddleOcrClient(RetryMixin):
     def ready(self) -> tuple[bool, str]:
         """是否具备运行条件（凭据完整）。路由器据此决定要不要纳入链路。"""
         if not self.cfg.token:
-            return False, ("未配置 Token：到 tools\\.env 填 "
+            return False, ("未配置 Token：到程序目录的 .env 填 "
                            "PADDLEOCR_MCP_AISTUDIO_ACCESS_TOKEN 或 DOC2MD_PADDLE_TOKEN")
         if not self.cfg.base_url:
             return False, "未配置 base_url"

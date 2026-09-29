@@ -35,6 +35,9 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+# 图形界面 / 打包专用的完整 Python 环境（带 tkinter；本机的 .venv 是精简版没有）
+.venv-gui/
+venv-gui/
 env/
 benv/
 _benv/

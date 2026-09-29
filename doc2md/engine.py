@@ -68,6 +68,7 @@ class Report:
     failed: int = 0
     blocked: int = 0
     deferred: int = 0
+    aborted: int = 0               # 被外部中止（GUI 停止按钮）而未处理的文件数
     ocr_pages: int = 0
     ocr_files: int = 0
     ocr_paused: bool = False
@@ -94,10 +95,14 @@ class Report:
 
 class Engine:
     def __init__(self, cfg: Config, store: StateStore, verbose: bool = True,
-                 logger: Callable[[str], None] | None = None):
+                 logger: Callable[[str], None] | None = None,
+                 should_stop: Callable[[], bool] | None = None):
         self.cfg = cfg
         self.store = store
         self.verbose = verbose
+        # 外部中止钩子（GUI 的「停止」按钮用；CLI 传 None，行为与以前完全一致）。
+        # 只在「取下一个任务之前」检查：正在转换的文件会跑完，不会留下半个 md。
+        self._should_stop = should_stop
         self._log_lock = threading.Lock()
         self._log_fn = logger or (lambda m: print(m, flush=True))
         self.local_ocr = (
@@ -695,6 +700,8 @@ class Engine:
 
             def runner():
                 while True:
+                    if self._should_stop is not None and self._should_stop():
+                        return
                     with q_lock:
                         if not q:
                             return
@@ -718,6 +725,11 @@ class Engine:
         spawn(ocr_pool, ocr_workers)
         for th in threads:
             th.join()
+
+        if self._should_stop is not None and self._should_stop():
+            self.report.aborted = max(0, total - done)
+            self.log(f"\n[已停止] 本轮中止，剩余 {self.report.aborted} 个文件未处理"
+                     f"（已完成的已入库，重跑会自动跳过）。")
 
         self.com.shutdown()
         return self.report

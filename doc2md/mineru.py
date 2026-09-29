@@ -145,7 +145,7 @@ class MinerUOcrClient(RetryMixin):
     def ready(self) -> tuple[bool, str]:
         """是否具备运行条件（凭据/参数完整）。路由器据此决定要不要纳入链路。"""
         if self.mode == "precision" and not self.cfg.token:
-            return False, ("precision 需要 Token：到 tools\\.env 填 DOC2MD_MINERU_TOKEN"
+            return False, ("precision 需要 Token：到程序目录的 .env 填 DOC2MD_MINERU_TOKEN"
                            "（mineru.net 的 API 管理页创建）")
         language = (self.cfg.language or "ch").strip()
         if not language:

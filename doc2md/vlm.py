@@ -177,7 +177,7 @@ class VlmOcrClient(RetryMixin):
             return False, "未配置 model"
         # send_token 显式设成 False 时允许无 Token（自建 vLLM 等免鉴权服务）
         if not self.cfg.token and getattr(self.cfg, "send_token", None) is not False:
-            return False, ("需要 Token：到 tools\\.env 填 DOC2MD_SILICONFLOW_TOKEN"
+            return False, ("需要 Token：到程序目录的 .env 填 DOC2MD_SILICONFLOW_TOKEN"
                            "（siliconflow.cn 控制台「API 密钥」页创建）")
         return True, "就绪"
 

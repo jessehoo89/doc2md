@@ -35,6 +35,18 @@ OFFICE_LOCAL = {Kind.DOCX: "docx", Kind.XLSX: "xlsx"}
 OFFICE_COM = {Kind.DOC: "doc", Kind.XLS: "xls"}
 SKIP_KINDS = {Kind.MISSING, Kind.UNKNOWN, Kind.ZIP_UNKNOWN, Kind.OLE_UNKNOWN,
               Kind.PPT, Kind.PPTX, Kind.IMAGE, Kind.RTF}
+# OLE2 外壳：加密 OOXML 与设了打开密码的老式 .doc/.xls 都长这样
+_OLE2_KINDS = {Kind.DOC, Kind.XLS, Kind.PPT, Kind.OLE_UNKNOWN}
+
+# COM / 第三方库在"文件有打开密码"时报的错措辞因厂商而异，
+# 命中这些词就按"加密"归类，而不是记成转换失败（重试无意义）。
+_PASSWORD_HINTS = ("密码", "password", "passwd", "加密", "encrypt",
+                   "受保护", "protected", "protection", "read-only recommend")
+
+
+def _looks_encrypted(err: BaseException) -> bool:
+    text = str(err).lower()
+    return any(h in text for h in _PASSWORD_HINTS)
 
 
 def _norm(p) -> str:
@@ -76,13 +88,29 @@ class Report:
     ocr_missing_images: int = 0    # 后端只返回文字、插图丢失的文件数
     by_engine: Counter = field(default_factory=Counter)
     ocr_by_backend: Counter = field(default_factory=Counter)
+    # 跳过的原因分布。绝大多数是"已转换"（幂等跳过），把它单独滤掉后
+    # 剩下的才是有信息量的（空文档、已加密、OCR 未启用…）。
+    skipped_by_reason: Counter = field(default_factory=Counter)
     errors: list[tuple[str, str]] = field(default_factory=list)
     started: float = field(default_factory=time.time)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # 幂等跳过的固定措辞，汇总时不单独列出（不然几千条会淹没有效信息）
+    ROUTINE_SKIPS = ("已转换", "已有较新 md")
+
     def add_engine(self, name: str) -> None:
         with self.lock:
             self.by_engine[name] += 1
+
+    def add_skip(self, reason: str) -> None:
+        with self.lock:
+            self.skipped_by_reason[reason] += 1
+
+    def notable_skips(self) -> list[tuple[str, int]]:
+        """有信息量的跳过原因（滤掉幂等跳过），按数量降序。"""
+        items = [(k, v) for k, v in self.skipped_by_reason.items()
+                 if k not in self.ROUTINE_SKIPS]
+        return sorted(items, key=lambda x: -x[1])
 
     def add_error(self, path: str, err: str) -> None:
         with self.lock:
@@ -181,6 +209,29 @@ class Engine:
         kind = detect.sniff(path)
         ext = path.suffix.lower()
 
+        # 加密文件（设了打开密码）提前拦截。两个好处：一是不必去调又慢又
+        # 必报错的 COM；二是不把「缺密码」这种靠重试解决不了的情况混进
+        # "失败"里 —— 那会让失败列表永远清不干净，也掩盖真正的问题。
+        # 只对 OLE2 外壳的文件探测：加密 OOXML 与老式 .doc/.xls 都是这种外壳，
+        # 普通 docx/pdf 没必要为此白读一遍文件。
+        if kind in _OLE2_KINDS:
+            try:
+                enc = detect.encryption_reason(path)
+            except Exception:  # noqa: BLE001
+                enc = None
+            if enc:
+                return Task(path, size, mtime, kind, "encrypted", 0, enc)
+
+        # 空壳文档（WPS 存出来的、正文与插图都没有的 docx）：转换结果必然是空，
+        # 属于源文件本身没内容，不是转换失败。
+        if kind is Kind.DOCX:
+            try:
+                if detect.docx_is_empty(path) is True:
+                    return Task(path, size, mtime, kind, "empty", 0,
+                                "文档为空（无正文文本、无插图）")
+            except Exception:  # noqa: BLE001
+                pass
+
         if kind in OFFICE_LOCAL:
             return Task(path, size, mtime, kind, OFFICE_LOCAL[kind])
         if kind in OFFICE_COM:
@@ -277,6 +328,14 @@ class Engine:
     def process(self, t: Task) -> tuple[str, str]:
         """返回 (结果, 引擎/原因)。结果 ∈ ok / skip / fail / blocked。"""
         src = t.src
+
+        # 提前定性的两类：源文件是空壳 / 有打开密码。
+        # 既不是"转换失败"，也不该占用 md 名字、更不该进重试队列 ——
+        # 重试一万次结果也一样。所以在取输出路径之前就返回。
+        if t.route in ("encrypted", "empty"):
+            self.store.mark_skipped(src, t.size, t.mtime, t.route, t.note)
+            return "skip", t.note
+
         md_path = self.md_path_for(src)
 
         # 幂等：未变化且已成功 → 跳过
@@ -305,6 +364,12 @@ class Engine:
             self.store.mark_deferred(src, t.size, t.mtime, t.route, str(e))
             return "defer", "当日 OCR 配额已用尽"
         except Exception as e:
+            if _looks_encrypted(e):
+                # 提前探测没覆盖到的（.wps/.et、IRM 保护、厂商措辞不同…）在这里归类。
+                # 仍然算"跳过"而不是"失败"：这不是程序的问题，重试也不会变好。
+                reason = f"文件已加密或受保护，无法打开：{type(e).__name__}: {str(e)[:160]}"
+                self.store.mark_skipped(src, t.size, t.mtime, t.route, reason)
+                return "skip", "文件已加密/受保护"
             self.store.mark_failed(src, t.size, t.mtime, t.route, f"{type(e).__name__}: {e}")
             if self.verbose:
                 self.log(f"      ↳ {traceback.format_exc(limit=2).strip().splitlines()[-1]}")
@@ -357,7 +422,12 @@ class Engine:
             raise RuntimeError(f"未知本地路线 {t.route}")
 
         if not md.strip():
-            raise RuntimeError("解析结果为空")
+            # 能走到这里说明格式本身认得、解析也跑通了，只是里面没内容。
+            # 那是源文件的问题，不是转换失败 —— 记成 skipped，别让它一直失败重试。
+            _drop_empty_dir(assets)
+            reason = "文档没有可提取的文本内容（正文为空）"
+            self.store.mark_skipped(src, t.size, t.mtime, engine, reason)
+            return "skip", "文档无文本内容"
         self._write_md(md_path, md, title)
         _drop_empty_dir(assets)
         self.store.mark_ok(src, t.size, t.mtime, engine, str(md_path), t.pages)
@@ -381,7 +451,12 @@ class Engine:
             cleanup_temp(tmp)
 
         if not md.strip():
-            raise RuntimeError("COM 转换后解析结果为空")
+            # 同 _run_local：老式格式转换成功但内容为空，是源文件的问题
+            if engine == "com-docx":
+                _drop_empty_dir(self._assets(md_path))
+            reason = "文档没有可提取的文本内容（正文为空，经 COM 转换）"
+            self.store.mark_skipped(src, t.size, t.mtime, engine, reason)
+            return "skip", "文档无文本内容"
         self._write_md(md_path, md, src.stem)
         if engine == "com-docx":
             _drop_empty_dir(self._assets(md_path))
@@ -677,6 +752,7 @@ class Engine:
                 self.report.add_engine(info.split("(")[0])
             elif status == "skip":
                 self.report.skipped += 1
+                self.report.add_skip(info)
             elif status == "blocked":
                 self.report.blocked += 1
             elif status == "defer":

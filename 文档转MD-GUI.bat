@@ -4,10 +4,11 @@ rem  Launch the graphical interface (gui.py).
 rem
 rem  WHY THIS FILE EXISTS
 rem    The GUI needs a Python that has tkinter.  The WorkBuddy-managed Python
-rem    3.13 on this machine is a trimmed build WITHOUT tkinter (no _tkinter.pyd
-rem    at all), so the project's own .venv cannot run the GUI.  .venv-gui is a
-rem    second environment built from a full CPython (uv-managed 3.11.15) which
-rem    DOES ship tkinter -- that is the one we prefer here.
+rem    is a trimmed build WITHOUT tkinter (no _tkinter.pyd at all), so the
+rem    project's own .venv cannot run the GUI.  .venv-gui is a second
+rem    environment built from a FULL CPython that DOES ship tkinter -- that is
+rem    the one we prefer here.  Any full CPython 3.11+ works; on this machine
+rem    it is the uv-managed 3.12.13.
 rem
 rem  The file NAME is Chinese so it reads well when double-clicked from
 rem  Explorer; the CONTENT stays pure ASCII so cmd's code page cannot garble it.

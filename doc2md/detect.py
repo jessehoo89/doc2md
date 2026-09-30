@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import re
+import zipfile
 from enum import Enum
 from pathlib import Path
 
@@ -307,3 +309,316 @@ def is_stable(path: str | Path, wait: float = 1.5) -> bool:
     except OSError:
         return False
     return s1 == s2 and s2 > 0
+
+
+# ---------------- 加密（受密码保护）识别 ----------------
+# 设了「打开密码」的 Office 文件在磁盘上有两种长相，光看文件头与正常文件
+# 完全一样，必须往里读一层才能认出来：
+#
+#   1. **加密的 OOXML**（.docx/.xlsx/.pptx 设了打开密码）
+#      —— 外层其实是个 OLE2 容器，里面装着 `EncryptedPackage`（密文本身）
+#      与 `EncryptionInfo`（加密参数）两个流。所以它**魔数是 OLE2**，
+#      扩展名却是 .docx，`sniff()` 会按扩展名兜底判成 DOC 而送进 COM，
+#      然后 WPS 报一句「文档打开失败」—— 看着像文件损坏，其实是缺密码。
+#
+#   2. **老式 .doc/.xls 设了打开密码** —— 仍是对应格式，但
+#      Word 靠 FIB 的 fEncrypted 位标记、Excel 靠 BIFF 的 FILEPASS 记录标记。
+#
+# 认出来的价值有两个：一是不必去调慢且会报错的 COM，二是不把
+# 「缺密码」这种**不可能靠重试解决**的情况混进「失败」里反复重跑。
+
+_CFB_ENDOFCHAIN = 0xFFFFFFFE
+_CFB_FREESECT = 0xFFFFFFFF
+_CFB_DIFAT_IN_HEADER = 109
+# 探测时最多读这么多字节。CFB 的头、DIFAT、FAT、目录项以及本文要读的那
+# 几十字节流（FIB / BIFF 头部）几乎总落在这个范围内；超出的部分读不到就
+# 判定"探测不出来"，由 COM 报错分类兜底 —— 绝不为了探测把整个大文件读一遍。
+_ENCRYPT_PROBE_BYTES = 4 * 1024 * 1024
+
+# 加密 OOXML 里的标志性流名
+_ENCRYPTED_STREAM_NAMES = frozenset({
+    "EncryptedPackage", "EncryptionInfo", "EncryptedSummary",
+})
+_WORD_FIB_SIG = 0xA5EC        # WordDocument 流开头的 wIdent
+_FIB_FENCRYPTED = 0x0100      # FIB.flags 的 bit 8：文档已加密
+_BIFF_FILEPASS = 0x002F       # BIFF 记录：工作簿有打开密码
+_BIFF_BOF = 0x0809
+
+
+class CfbReader:
+    """最小 OLE2/CFB 只读解析器：列出目录项、读某个流的前几字节。
+
+    只实现读所需的必要部分（头、DIFAT、FAT、miniFAT、目录项、流链）。
+    任何异常都直接抛给调用方，由调用方当作"探测不出来"处理 ——
+    探测失败绝不能让转换流程崩掉。
+    """
+
+    def __init__(self, data: bytes):
+        if len(data) < 512 or data[:8] != OLE2_SIG:
+            raise ValueError("不是 OLE2/CFB 文件")
+        self.data = data
+        shift = int.from_bytes(data[0x1E:0x20], "little")
+        mini_shift = int.from_bytes(data[0x20:0x22], "little")
+        if not (7 <= shift <= 20) or not (2 <= mini_shift <= shift):
+            raise ValueError("扇区大小异常")
+        self.sect_size = 1 << shift
+        self.mini_size = 1 << mini_shift
+        self.n_fat = int.from_bytes(data[0x2C:0x30], "little")
+        self.dir_start = int.from_bytes(data[0x30:0x34], "little")
+        self.cutoff = int.from_bytes(data[0x38:0x3C], "little")
+        self.minifat_start = int.from_bytes(data[0x3C:0x40], "little")
+        self.n_minifat = int.from_bytes(data[0x40:0x44], "little")
+        self.difat_start = int.from_bytes(data[0x44:0x48], "little")
+        self.n_difat = int.from_bytes(data[0x48:0x4C], "little")
+        if self.sect_size <= 0 or self.sect_size > (1 << 20):
+            raise ValueError("扇区大小异常")
+        self._fat = self._load_fat()
+        self._minifat = self._load_minifat()
+        self._entries = self._load_dir()
+        self._mini_stream: bytes | None = None
+
+    # ---------- 底层 ----------
+    def _sector(self, i: int) -> bytes:
+        off = 512 + i * self.sect_size
+        chunk = self.data[off:off + self.sect_size]
+        if len(chunk) < self.sect_size:
+            raise ValueError("扇区超出已读取范围")
+        return chunk
+
+    def _chain(self, fat: list[int], start: int, limit: int = 1 << 22) -> list[int]:
+        out: list[int] = []
+        cur = start
+        seen: set[int] = set()
+        while cur not in (_CFB_ENDOFCHAIN, _CFB_FREESECT):
+            if cur in seen or cur >= len(fat) or len(out) > limit:
+                # 成环 / 越界：当作链到此为止，而不是死循环
+                break
+            seen.add(cur)
+            out.append(cur)
+            cur = fat[cur]
+        return out
+
+    def _load_fat(self) -> list[int]:
+        difat: list[int] = []
+        for i in range(_CFB_DIFAT_IN_HEADER):
+            v = int.from_bytes(self.data[0x4C + i * 4:0x50 + i * 4], "little")
+            if v != _CFB_FREESECT:
+                difat.append(v)
+        # DIFAT 扩展扇区（大文件才有）
+        cur = self.difat_start
+        for _ in range(min(self.n_difat, 256)):
+            if cur in (_CFB_ENDOFCHAIN, _CFB_FREESECT):
+                break
+            try:
+                sect = self._sector(cur)
+            except ValueError:
+                break
+            for i in range(self.sect_size // 4 - 1):
+                v = int.from_bytes(sect[i * 4:i * 4 + 4], "little")
+                if v != _CFB_FREESECT:
+                    difat.append(v)
+            cur = int.from_bytes(sect[-4:], "little")
+        fat: list[int] = []
+        n_fat = max(1, self.n_fat) if self.n_fat else len(difat)
+        for s in difat[:n_fat]:
+            try:
+                sect = self._sector(s)
+            except ValueError:
+                break
+            for j in range(self.sect_size // 4):
+                fat.append(int.from_bytes(sect[j * 4:j * 4 + 4], "little"))
+        if not fat:
+            raise ValueError("读不到 FAT")
+        return fat
+
+    def _load_minifat(self) -> list[int]:
+        if self.n_minifat <= 0 or self.minifat_start in (_CFB_ENDOFCHAIN, _CFB_FREESECT):
+            return []
+        out: list[int] = []
+        try:
+            for s in self._chain(self._fat, self.minifat_start):
+                sect = self._sector(s)
+                for j in range(self.sect_size // 4):
+                    out.append(int.from_bytes(sect[j * 4:j * 4 + 4], "little"))
+        except ValueError:
+            return []
+        return out
+
+    def _load_dir(self) -> list[dict]:
+        entries: list[dict] = []
+        for s in self._chain(self._fat, self.dir_start):
+            try:
+                sect = self._sector(s)
+            except ValueError:
+                break
+            for k in range(0, self.sect_size, 128):
+                e = sect[k:k + 128]
+                if len(e) < 128:
+                    break
+                nlen = int.from_bytes(e[0x40:0x42], "little")
+                if not (0 < nlen <= 64):
+                    continue
+                try:
+                    name = e[:nlen - 2].decode("utf-16-le", "ignore")
+                except Exception:
+                    continue
+                entries.append({
+                    "name": name,
+                    "type": e[0x42],
+                    "start": int.from_bytes(e[0x74:0x78], "little"),
+                    "size": int.from_bytes(e[0x78:0x80], "little"),
+                })
+        if not entries:
+            raise ValueError("读不到目录项")
+        return entries
+
+    # ---------- 对外 ----------
+    def names(self) -> list[str]:
+        return [e["name"] for e in self._entries]
+
+    def find(self, name: str) -> dict | None:
+        for e in self._entries:
+            if e["name"] == name:
+                return e
+        return None
+
+    def _read_chain(self, fat: list[int], start: int, size: int) -> bytes:
+        """沿 FAT 链拼出主扇区里的流内容（最多 size 字节，size=0 表示全读）。"""
+        buf = bytearray()
+        for s in self._chain(fat, start):
+            buf += self._sector(s)
+            if size and len(buf) >= size:
+                break
+        return bytes(buf[:size]) if size else bytes(buf)
+
+    def _mini_container(self) -> bytes:
+        """mini 流的宿主 = 根目录项的流（小于 cutoff 的流都寄存在它里面）。"""
+        if self._mini_stream is not None:
+            return self._mini_stream
+        root = self._entries[0]
+        if root["size"] <= 0:
+            raise ValueError("没有根流")
+        self._mini_stream = self._read_chain(self._fat, root["start"], root["size"])
+        return self._mini_stream
+
+    def stream(self, name: str, max_bytes: int = 4096) -> bytes | None:
+        """读指定流的前 max_bytes 字节；流不存在返回 None。"""
+        e = self.find(name)
+        if e is None or e["type"] != 2:
+            return None
+        size = e["size"]
+        want = min(size, max_bytes) if size else max_bytes
+        if size and size < self.cutoff:
+            # 小流寄存在根流里，走 miniFAT
+            mini = self._mini_container()
+            buf = bytearray()
+            for s in self._chain(self._minifat, e["start"]):
+                off = s * self.mini_size
+                buf += mini[off:off + self.mini_size]
+                if len(buf) >= want:
+                    break
+            return bytes(buf[:want])
+        return self._read_chain(self._fat, e["start"], want)
+
+
+def _biff_has_filepass(stream: bytes) -> bool:
+    """在 BIFF 记录流里找 FILEPASS（工作簿打开密码的标志）。
+
+    只走开头的记录 —— FILEPASS 总是紧跟在 BOF 之后，不必扫全流。
+    """
+    pos = 0
+    for _ in range(40):
+        if pos + 4 > len(stream):
+            return False
+        wtype = int.from_bytes(stream[pos:pos + 2], "little")
+        cb = int.from_bytes(stream[pos + 2:pos + 4], "little")
+        if wtype == _BIFF_FILEPASS:
+            return True
+        if wtype != _BIFF_BOF and pos > 0 and wtype == 0x000A:  # EOF
+            return False
+        pos += 4 + cb
+    return False
+
+
+def encryption_reason(path: str | Path) -> str | None:
+    """文件是否受「打开密码」保护。是则返回中文原因，否则 None。
+
+    只对 OLE2 外壳的文件有意义（加密 OOXML 与老式 .doc/.xls 都是 OLE2），
+    调用方应先看 `sniff()` 的结果再决定要不要问 —— 免得对着普通 docx 白读一遍。
+    """
+    p = Path(path)
+    try:
+        size = p.stat().st_size
+        with open(p, "rb") as f:
+            data = f.read(min(size, _ENCRYPT_PROBE_BYTES))
+    except OSError:
+        return None
+    if len(data) < 512 or data[:8] != OLE2_SIG:
+        return None
+
+    try:
+        cfb = CfbReader(data)
+    except Exception:  # noqa: BLE001
+        # 结构读不动（大文件被截断、非标准 CFB…）：退一步只做关键字扫描。
+        # 只认「加密标志流名」这一个强特征，见不到就当没加密、
+        # 交给正常转换流程（并由 COM 报错分类兜底）。
+        for nm in _ENCRYPTED_STREAM_NAMES:
+            if nm.encode("utf-16-le") in data:
+                return "文件已加密（设了打开密码），需先去掉密码才能转换"
+        return None
+
+    try:
+        names = cfb.names()
+        if _ENCRYPTED_STREAM_NAMES & set(names):
+            return "文件已加密（设了打开密码），需先去掉密码才能转换"
+        if "WordDocument" in names:
+            fib = cfb.stream("WordDocument", 32) or b""
+            if len(fib) >= 12 and int.from_bytes(fib[0:2], "little") == _WORD_FIB_SIG:
+                if int.from_bytes(fib[10:12], "little") & _FIB_FENCRYPTED:
+                    return "Word 文档已加密（设了打开密码），需先去掉密码才能转换"
+        for wb_name in ("Workbook", "Book"):
+            if wb_name in names:
+                head = cfb.stream(wb_name, 2048) or b""
+                if _biff_has_filepass(head):
+                    return "Excel 工作簿已加密（设了打开密码），需先去掉密码才能转换"
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+# ---------------- 空文档识别 ----------------
+# z.read() 出来的是字节，不能用 `<w:t` 做子串判断 —— 它会误中
+# `<w:tab/>`、`<w:tbl>`、`<w:tc>`、`<w:tr>` 这些同样以 `<w:t` 开头的标签，
+# 于是把空文档判成"有内容"。必须要求标签在 t 之后立刻收尾或跟属性。
+_TEXT_TAG_RE = re.compile(rb"<(?:w|a):t[\s/>]")
+
+
+def docx_is_empty(path: str | Path) -> bool | None:
+    """docx 是否**通篇没有任何正文文本、也没有插图**。
+
+    只看 `word/` 下的部件：任何一处出现 `<w:t>`（页眉、页脚、脚注里的文字
+    也算）或存在媒体文件，就不算空。返回 None 表示"判断不了"（不是合法
+    zip 等）—— 那种情况交给正常转换流程去报错，不要替它下结论。
+
+    为什么值得单独判：WPS 会保存出结构完整、但正文为空的壳文件。
+    这种文件转换结果必然为空，属于**源文件没内容**，不是转换失败。
+    """
+    p = Path(path)
+    try:
+        with zipfile.ZipFile(p) as z:
+            for name in z.namelist():
+                if not name.startswith("word/"):
+                    continue
+                if "/media/" in name:
+                    return False
+                if not name.endswith(".xml"):
+                    continue
+                try:
+                    if _TEXT_TAG_RE.search(z.read(name)):
+                        return False
+                except Exception:  # noqa: BLE001
+                    return None
+    except Exception:  # noqa: BLE001
+        return None
+    return True
+

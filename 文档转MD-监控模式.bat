@@ -1,6 +1,6 @@
 @echo off
 rem  ---------------------------------------------------------------------------
-rem   Document -> Markdown   ·   real-time watch mode
+rem   Document -> Markdown   -   real-time watch mode
 rem  ---------------------------------------------------------------------------
 setlocal
 title Document to Markdown - Watch Mode

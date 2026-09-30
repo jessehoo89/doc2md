@@ -239,6 +239,13 @@ class StateStore:
                     "SELECT path, error FROM files WHERE status='failed' ORDER BY updated DESC LIMIT 30"
                 )
             ]
+            skipped_reasons = [
+                (r["error"] or "(未记录原因)", r["c"])
+                for r in self._conn.execute(
+                    "SELECT error, COUNT(*) c FROM files WHERE status='skipped' "
+                    "GROUP BY error ORDER BY c DESC LIMIT 10"
+                )
+            ]
         return {
             "total": total,
             "by_status": by_status,
@@ -247,6 +254,7 @@ class StateStore:
             "pages_today": self.pages_used_today(),
             "backend_pages_today": self.backend_usage_today(),
             "recent_failures": failed,
+            "skipped_reasons": skipped_reasons,
         }
 
     # ---------- 重试支持 ----------

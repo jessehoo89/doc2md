@@ -2,7 +2,7 @@
 rem  ---------------------------------------------------------------------------
 rem   Cloud OCR self-check: backend connectivity + credentials in effect.
 rem   With an argument, that argument is passed straight to doc2md instead, e.g.
-rem      云端OCR自检.bat status
+rem      <this file> status
 rem  ---------------------------------------------------------------------------
 setlocal
 title Cloud OCR self-check

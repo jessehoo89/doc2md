@@ -165,14 +165,19 @@ DLLs/_tkinter.pyd         →  不存在
 ```
 
 所以 `.venv` 里跑 GUI 会直接 `ModuleNotFoundError: No module named 'tkinter'`。
-`.venv-gui` 是从本机另一套**完整 CPython 3.11.15**（uv 管理的，自带 tkinter、
-Tk 8.6）建的，专供图形界面与打包使用：
+`.venv-gui` 是从本机另一套**完整 CPython**（自带 tkinter、Tk 8.6）建的，
+专供图形界面与打包使用 —— **3.11 及以上任意完整版本都行**：
 
 ```bat
 :: 一次即可（约几分钟，取决于网速）
 python -m venv .venv-gui
 .venv-gui\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+> 建 `.venv-gui` 的那个 `python` 必须是**完整** CPython（官网安装版或 uv 装的
+> 独立版本都可以）。判断标准只有一条：`python -c "import tkinter"` 不报错。
+> uv 装的解释器用 `uv python list` 或看 `%APPDATA%\uv\python\` 下的目录名。
+> 打包同理 —— 用哪个解释器建的 `.venv-gui`，就打进哪种运行时。
 
 没建也不会出事：`文档转MD-GUI.bat` 会挑不到解释器并给出上面这两行命令，
 菜单里的 `G` 也会明确提示"当前解释器没有 tkinter"。
@@ -351,6 +356,34 @@ python -m venv .venv-gui
   的 `stdout` 不是真实句柄，据此认出自己该开图形界面。
 - `engine.py` 多了一个可选的 `should_stop` 回调（GUI 的「停止」按钮用），
   CLI 不传就是 `None`，行为与以前完全一致。
+
+---
+
+## 空文档与加密文件：为什么不算「失败」
+
+统计里有一类文件**永远转不出东西，但也不该躺在失败列表里**。它们有个共同点：
+问题出在**源文件本身**，重试一万次结果也一样。现在它们统一记成 `skipped`：
+
+| 情况 | 怎么认出来的 | 归类 |
+|---|---|---|
+| **空壳文档** —— WPS 会存出结构完整、正文却一个字符都没有的 docx | 包内 `word/` 下任何部件都没有 `<w:t>` 文本标签，也没有任何媒体文件 | `skipped`：文档为空（无正文文本、无插图） |
+| **加密的 OOXML** —— .docx 设了「打开密码」，外层其实是 OLE2，里面装着 `EncryptedPackage` + `EncryptionInfo` | 解析 OLE2 目录项，见到这两个标志流；结构读不动时退回按 UTF-16LE 关键字扫描 | `skipped`：文件已加密，需先去掉密码 |
+| **加密的老式 .doc / .xls** —— 格式没变，靠标记位声明有密码 | Word 读 FIB 的 `fEncrypted` 位；Excel 走 BIFF 的 `FILEPASS` 记录 | 同上 |
+
+为什么要费劲去认：不认的话，加密的 `.docx` 会被 `sniff()` 按扩展名当成老 doc
+送进 COM，WPS 回一句「文档打开失败」—— 看着像文件损坏，其实只差一个密码；
+然后它每次 `run` / `retry` 都再报一次，把真正需要处理的问题淹掉。
+
+识别逻辑全在 `detect.py`（`CfbReader` / `encryption_reason` / `docx_is_empty`），
+**零外部依赖**（自己实现了一个最小的 OLE2/CFB 目录解析器，不引 `olefile`）。
+加密文件在**分流阶段就被拦下**，连慢且必报错的 COM 都不会去调；
+万一还有漏网的（`.wps`/`.et`、IRM 保护等），`_run_com` 的异常分类会兜底 ——
+错误信息里带「密码 / 加密 / protected」的一律按加密归类，而不是记失败。
+
+反过来，这两种情况**必须仍然算失败**，别被上面误伤：文档读得动、但解析确实报错的
+（格式损坏、COM 异常），以及 OCR 后端返回空结果的。
+
+对应测试：`tests/test_encrypted_empty.py`（夹具全部现场构造，不依赖个人语料）。
 
 ---
 

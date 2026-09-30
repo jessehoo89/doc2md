@@ -15,6 +15,10 @@ state.db
 state.db-wal
 state.db-shm
 state.db.bak-*
+# 从别的机器搬过来的旧文件，统一加「.来自X盘」后缀就地隔离（保留备查，不提交）
+*.来自*盘
+*.bak-*
+*.坏掉-*
 *.log
 logs/
 tmp/
@@ -37,6 +41,7 @@ __pycache__/
 venv/
 # 图形界面 / 打包专用的完整 Python 环境（带 tkinter；本机的 .venv 是精简版没有）
 .venv-gui/
+.venv-gui.*/
 venv-gui/
 env/
 benv/

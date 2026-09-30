@@ -1,6 +1,6 @@
 @echo off
 rem  ---------------------------------------------------------------------------
-rem   Document -> Markdown   ·   interactive menu
+rem   Document -> Markdown   -   interactive menu
 rem   Chinese prompts are printed by launcher.py; cmd's OEM code page would
 rem   mangle them, so this file deliberately stays ASCII-only.
 rem  ---------------------------------------------------------------------------

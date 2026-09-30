@@ -111,6 +111,11 @@ def cmd_run(args, cfg: Config) -> int:
     print("  转换完成")
     print("=" * 74)
     print(f"  成功 {rep.ok}   跳过 {rep.skipped}   失败 {rep.failed}   拦截 {rep.blocked}")
+    notable = rep.notable_skips()
+    if notable:
+        # 空文档 / 已加密 这类不是失败，但也别让它们悄悄消失
+        dist = "，".join(f"{k} {v}" for k, v in notable[:5])
+        print(f"       其中：{dist}")
     if rep.deferred:
         print(f"  暂缓待重试 {rep.deferred}")
     if rep.ocr_pages:
@@ -180,14 +185,18 @@ def cmd_test(args, cfg: Config) -> int:
         print(f"  页数     : {t.pages}")
     if t.note:
         print(f"  备注     : {t.note}")
-    out_path = eng.md_path_for(target)
-    print(f"  将输出到 : {out_path}")
+    if t.route in ("encrypted", "empty"):
+        # 这两类不会产出 md，别打印一个不存在的输出路径误导人
+        out_path = None
+    else:
+        out_path = eng.md_path_for(target)
+        print(f"  将输出到 : {out_path}")
     print()
     status, info = eng.process(t)
     store.close()
     md = out_path
     print(f"\n  结果：{status}  ({info})")
-    if md.exists():
+    if md is not None and md.exists():
         text = md.read_text(encoding="utf-8-sig")
         print(f"  输出：{md}")
         print(f"  字数：{len(text)}")
@@ -207,6 +216,10 @@ def cmd_status(args, cfg: Config) -> int:
     print(f"  已记录   : {s['total']} 个文件")
     for k, v in sorted(s["by_status"].items(), key=lambda x: -x[1]):
         print(f"    {k:<10} {v}")
+    if s.get("skipped_reasons"):
+        print("  跳过原因（前 10）：")
+        for reason, n in s["skipped_reasons"]:
+            print(f"    {n:>6}  {reason[:70]}")
     if s["by_engine"]:
         print("  按引擎：")
         for k, v in list(s["by_engine"].items())[:12]:

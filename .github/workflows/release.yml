@@ -32,7 +32,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git zip \
+            ca-certificates curl git zip file time \
             python3 python3-venv python3-dev python3-tk \
             build-essential patchelf
           python3 --version

@@ -40,6 +40,37 @@ if [ -z "$PY" ]; then
 fi
 echo "使用解释器：$PY ($("$PY" -c 'import sys;print(sys.version.split()[0])'))  形态：$MODE"
 
+# ---- 展示用的小工具：有就用、没有就退化 —— 这些不是构建的必需环节，不能拖垮整个打包 ----
+bin_type() {                    # 识别产物类型；本机没装 file 就退化成 ELF 魔数
+    if command -v file >/dev/null 2>&1; then
+        file -b "$1" 2>/dev/null | cut -c1-55
+    else
+        head -c 4 "$1" | od -An -tx1 | tr -d ' \n'      # 7f454c46 = ELF
+    fi
+}
+elapsed() {                     # 测启动耗时；不依赖 /usr/bin/time（精简系统常没有）
+    local s e rc
+    s=$(date +%s%N); "$@" >/dev/null 2>&1; rc=$?; e=$(date +%s%N)
+    awk -v a="$s" -v b="$e" 'BEGIN { printf "%.2f", (b-a)/1000000000 }'
+    return $rc
+}
+
+# ---- 打包环境守卫：产物要求多新的 glibc，取决于构建机的 glibc ----
+# 2026-10-03 教训：在 ubuntu-latest（glibc 2.39）上打包，产物要求 GLIBC_2.38，
+# Debian 12（2.36）用户装完直接跑不起来（且下载校验和完全正确，很难往这里想）。
+MAX_GLIBC="${DOC2MD_MAX_GLIBC:-2.36}"        # 目标底线：Debian 12 / Ubuntu 23.04
+BUILD_GLIBC="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' | head -1)"
+if [ -n "$BUILD_GLIBC" ]; then
+    if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$BUILD_GLIBC" | sort -V | tail -1)" = "$MAX_GLIBC" ]; then
+        echo "构建机 glibc $BUILD_GLIBC ≤ 目标 $MAX_GLIBC ✔"
+    else
+        echo "⚠️ 构建机 glibc 是 $BUILD_GLIBC，比目标 $MAX_GLIBC 新：产物在 Debian 12 一类系统上会报"
+        echo "   「GLIBC_$BUILD_GLIBC not found」。请在更旧的容器里打包（CI 用 debian:12）；"
+        echo "   确实要在新系统上打包就设 DOC2MD_ALLOW_NEW_GLIBC=1 跳过。"
+        [ "${DOC2MD_ALLOW_NEW_GLIBC:-}" = 1 ] || exit 1
+    fi
+fi
+
 # ---- 依赖自检 ----
 "$PY" -c "import pymupdf, pymupdf4llm, mammoth, openpyxl" 2>/dev/null \
     || { echo "缺依赖，先跑：$PY -m pip install -r requirements.txt"; exit 1; }
@@ -60,7 +91,7 @@ build_onedir() {
     [ -x "$BIN" ] || { echo "失败：没看到 $BIN"; return 1; }
     echo "  产物：$(pwd)/dist/doc2md/"
     echo "  体积：$(du -sh dist/doc2md | cut -f1)  文件数：$(find dist/doc2md | wc -l)"
-    echo "  类型：$(file -b "$BIN" | cut -c1-55)"
+    echo "  类型：$(bin_type "$BIN")"
     ls dist/doc2md | grep -v _internal | sed 's/^/    /'
 }
 
@@ -73,11 +104,11 @@ build_onefile() {
     [ -x "$BIN" ] || { echo "失败：没看到 $BIN"; return 1; }
     echo "  产物：$(pwd)/$BIN"
     echo "  体积：$(du -sh "$BIN" | cut -f1)   （onedir 目录打包前的压缩档，故小于目录体积）"
-    echo "  类型：$(file -b "$BIN" | cut -c1-55)"
-    # 冷启动（首次要解包）与热启动各测一次
+    echo "  类型：$(bin_type "$BIN")"
+    # 冷启动（首次要解包）与热启动各测一次；跑不起来就直接判构建失败（别把坏产物推给用户）
     local t1 t2
-    t1=$( { /usr/bin/time -f %e "$BIN" --version >/dev/null; } 2>&1 | tail -1 )
-    t2=$( { /usr/bin/time -f %e "$BIN" --version >/dev/null; } 2>&1 | tail -1 )
+    t1=$(elapsed "$BIN" --version) || { echo "失败：单文件版打出来却跑不起来，报错如下"; "$BIN" --version; return 1; }
+    t2=$(elapsed "$BIN" --version) || true
     echo "  启动耗时：冷 ${t1}s / 热 ${t2}s（每次启动都要解包到临时目录）"
     echo "  解包位置：\${TMPDIR:-/tmp}/_MEIxxxxxx（进程退出即删）"
     echo "  单文件版随附配置：把 .env 放在可执行文件旁边才生效"

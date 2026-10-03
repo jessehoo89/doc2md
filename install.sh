@@ -89,10 +89,15 @@ note() { printf '[提示] %s\n' "$*"; }
 
 looks_like_binary() {
     [ -f "$1" ] && [ ! -d "$1" ] || return 1
+    local magic type
+    # 先认 ELF 魔数：不依赖 file，也避开 "file | grep -q" 在 pipefail 下抢 SIGPIPE（见 build_linux.sh 的注释）
+    magic="$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')"
+    [ "$magic" = 7f454c46 ] && return 0
     if command -v file >/dev/null 2>&1; then
-        file -b "$1" | grep -qiE 'ELF|Mach-O' && return 0 || return 1
+        type="$(file -b "$1" 2>/dev/null || true)"
+        case "$type" in *ELF*|*Mach-O*) return 0 ;; esac
     fi
-    head -c 4 "$1" | od -An -tx1 | grep -qi '7f 45 4c 46'   # ELF 魔数
+    return 1
 }
 
 # ---------------------------------------------------------------- 卸载
@@ -175,20 +180,20 @@ resolve_version() {             # 0 = 拿到了版本号；1 = 拿不到（调�
     is_github_repo || return 1      # 非 GitHub 仓库就别去问 api.github.com 了
     # ① GitHub API（先直连；直连不通再走加速前缀，api.github.com 国内通常还能用）
     VERSION="$(fetch_text "$API_URL" \
-        | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
+        | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | sed -n '1p')"
     if [ -z "$VERSION" ]; then
         VERSION="$(fetch_text "$(ghurl "$API_URL")" \
-            | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
+            | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | sed -n '1p')"
     fi
     # ② 退回：看 /releases/latest 跳去哪
     if [ -z "$VERSION" ] && command -v curl >/dev/null 2>&1; then
         VERSION="$(curl -fsSI --connect-timeout 20 "$(ghurl "$REPO/releases/latest")" 2>/dev/null \
-            | tr -d '\r' | sed -n 's#^[Ll]ocation: .*/tag/##p' | head -1)"
+            | tr -d '\r' | sed -n 's#^[Ll]ocation: .*/tag/##p' | sed -n '1p')"
     fi
     # ③ 再退回：从页面里捞 /tag/vX.Y.Z
     if [ -z "$VERSION" ]; then
         VERSION="$(fetch_text "$(ghurl "$REPO/releases/latest")" \
-            | grep -o '/tag/v[0-9][0-9A-Za-z._-]*' | head -1 | sed 's#/tag/##')"
+            | grep -o '/tag/v[0-9][0-9A-Za-z._-]*' | sed -n '1p' | sed 's#/tag/##')"
     fi
     [ -n "$VERSION" ] || return 1
 }
@@ -207,7 +212,7 @@ asset_name() {
 verify_sha256() {               # verify_sha256 <校验和文件> <文件名>（在文件所在目录里执行）
     local sums="$1" name="$2" line
     [ -s "$sums" ] || { note "没拿到校验和文件，跳过校验"; return 0; }
-    line="$(awk -v n="$name" '$2 == n { print }' "$sums" | head -1)"
+    line="$(awk -v n="$name" '$2 == n { print }' "$sums" | sed -n '1p')"
     [ -n "$line" ] || { note "校验和文件里没有 $name，跳过校验"; return 0; }
     if command -v sha256sum >/dev/null 2>&1; then
         printf '%s\n' "$line" | sha256sum -c - >/dev/null 2>&1 || return 1
@@ -416,9 +421,9 @@ say ""
 say "== 验证 =="
 VER_OUT=""
 if VER_OUT="$("$LAUNCHER" --version 2>&1)"; then
-    printf '%s\n' "$VER_OUT" | head -2
+    printf '%s\n' "$VER_OUT" | sed -n '1,2p'
 else
-    printf '%s\n' "$VER_OUT" | head -5 >&2
+    printf '%s\n' "$VER_OUT" | sed -n '1,5p' >&2
     # 现成程序跑不起来：多半是打包机的 glibc 比这台新（报 GLIBC_2.xx not found）。
     # 本机有 git + Python 3.11+ 就自动改源码安装，别让用户自己琢磨。
     if [ -n "$SRC_BIN" ] && [ "$FORCE_SOURCE" != 1 ] \
@@ -435,8 +440,8 @@ else
         fi
         say ""
         VER_OUT="$("$LAUNCHER" --version 2>&1)" \
-            || { printf '%s\n' "$VER_OUT" | head -5 >&2; die "源码方式也没跑起来，把上面的报错发出来看看"; }
-        printf '%s\n' "$VER_OUT" | head -2
+            || { printf '%s\n' "$VER_OUT" | sed -n '1,5p' >&2; die "源码方式也没跑起来，把上面的报错发出来看看"; }
+        printf '%s\n' "$VER_OUT" | sed -n '1,2p'
     else
         die "装好了但跑不起来（上面是报错）。两条路：① 本机装 git 与 Python 3.11+ 后加 --source 重跑；② 直接在 Windows 上用安装程序"
     fi

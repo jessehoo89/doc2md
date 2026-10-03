@@ -59,7 +59,11 @@ elapsed() {                     # 测启动耗时；不依赖 /usr/bin/time（�
 # 2026-10-03 教训：在 ubuntu-latest（glibc 2.39）上打包，产物要求 GLIBC_2.38，
 # Debian 12（2.36）用户装完直接跑不起来（且下载校验和完全正确，很难往这里想）。
 MAX_GLIBC="${DOC2MD_MAX_GLIBC:-2.36}"        # 目标底线：Debian 12 / Ubuntu 23.04
-BUILD_GLIBC="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' | head -1)"
+# ⚠️ 取版本号别用 "ldd --version | head -1"：head 提前退出会让 ldd 吃 SIGPIPE，
+#    set -o pipefail 下整条管道变 141，赋值失败 → set -e 直接退出（2026-10-03 CI 就这么挂的）。
+#    getconf 只输出一行，配合 || true 双保险；取不到再退回 sed -n '1p'（sed 会读完输入，不关管道）。
+BUILD_GLIBC="$(getconf GNU_LIBC_VERSION 2>/dev/null | grep -oE '[0-9]+\.[0-9]+$' || true)"
+[ -n "$BUILD_GLIBC" ] || BUILD_GLIBC="$(ldd --version 2>/dev/null | sed -n '1p' | grep -oE '[0-9]+\.[0-9]+$' || true)"
 if [ -n "$BUILD_GLIBC" ]; then
     if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$BUILD_GLIBC" | sort -V | tail -1)" = "$MAX_GLIBC" ]; then
         echo "构建机 glibc $BUILD_GLIBC ≤ 目标 $MAX_GLIBC ✔"

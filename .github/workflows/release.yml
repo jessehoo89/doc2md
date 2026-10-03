@@ -1,0 +1,117 @@
+name: Release
+
+# 手动触发：Actions 页面点 Run workflow，或 gh workflow run release.yml -f tag=v1.0.0
+# 三个平台各出一套产物，最后统一挂到 GitHub Release。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release 标签（如 v1.0.0）"
+        required: true
+        default: "v1.0.0"
+      draft:
+        description: "先建草稿（人工过目后再发布）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux 二进制（onedir + onefile）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.22.3
+      - name: 打包（两种形态）
+        run: bash build_linux.sh both
+      - name: 整理产物（单文件二进制 + 多文件版 zip）
+        run: |
+          set -e
+          mkdir -p out
+          cp dist-onefile/doc2md out/doc2md-${TAG}-linux-x86_64
+          chmod +x out/doc2md-${TAG}-linux-x86_64
+          (cd dist && zip -qr6 ../out/doc2md-${TAG}-linux-x86_64-onedir.zip doc2md)
+          ls -lh out
+          (cd out && sha256sum doc2md-${TAG}-linux-x86_64 doc2md-${TAG}-linux-x86_64-onedir.zip > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+        env:
+          TAG: ${{ inputs.tag }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-assets
+          path: out/
+
+  windows:
+    name: Windows 可执行文件 + 单文件安装程序
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.22.3
+      - name: 自检 tkinter（窗口版必须，缺了会打不出 doc2md-gui.exe）
+        run: python -c "import tkinter, sys; print('tkinter %s / python %s' % (tkinter.TkVersion, sys.version))"
+      - name: 构建应用 + 单文件安装程序
+        run: python make_installer.py
+      - name: 整理产物
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path dist/doc2md -DestinationPath "out/doc2md-$env:TAG-win-x64.zip"
+          Copy-Item "dist-installer/doc2md-安装程序.exe" "out/doc2md-$env:TAG-win-x64-installer.exe"
+          Get-ChildItem out | ForEach-Object {
+            (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + "  " + $_.Name
+          } | Set-Content out/SHA256SUMS-windows.txt -Encoding ascii
+          Get-Content out/SHA256SUMS-windows.txt
+          Get-ChildItem out | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: out/
+
+  release:
+    name: 建 Release 并挂产物
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: 组装说明 + 建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -e
+          ls -lh assets
+          cat .github/release-notes-template.md > /tmp/notes.md
+          {
+            echo ""
+            echo "### 校验和"
+            echo ""
+            echo '```'
+            cat assets/SHA256SUMS-*.txt
+            echo '```'
+          } >> /tmp/notes.md
+          FLAG=""
+          [ "$DRAFT" = "true" ] && FLAG="--draft"
+          gh release create "$TAG" $FLAG \
+            --title "doc2md $TAG" \
+            --notes-file /tmp/notes.md \
+            assets/*

@@ -50,7 +50,12 @@ from pathlib import Path
 
 APP_NAME = "doc2md"
 APP_TITLE = "doc2md · 文档批量转 Markdown"
-APP_VERSION = "1.0.0"
+# 版本号单一来源：doc2md/__init__.py 的 __version__（两个 spec 的 pathex 都是仓库根，
+# 打包时会把轻量的 doc2md 包一起带上，冻结后照样读得到；不再各自硬编码）
+try:
+    from doc2md import __version__ as APP_VERSION
+except Exception:                       # 源码被单独拷走的极端情况
+    APP_VERSION = "0.0.0"
 PUBLISHER = "doc2md"
 
 PAYLOAD_NAME = "doc2md-payload.zip"

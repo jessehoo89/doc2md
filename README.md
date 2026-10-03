@@ -92,7 +92,7 @@ curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
 ```
 
 默认装到 `~/.local`，装完就有 `doc2md` 命令。程序约 130MB，下完会按 Release 的
-`SHA256SUMS-linux.txt` 校验，对不上会直接停下。可用的参数：`--version v1.0.0`
+`SHA256SUMS-linux.txt` 校验，对不上会直接停下。可用的参数：`--version v1.0.2`
 （默认最新版）、`--gh-proxy https://gh-proxy.com/`（GitHub 慢时套加速）、
 `--bin 文件`（用你已下好的 Release 程序）、`--source`（改成 git clone 源码安装）、
 `--uninstall`。全部参数与环境变量见[使用说明](docs/USAGE.md#linux--macos一条命令--一键脚本--源码)。
@@ -113,7 +113,7 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/jessehoo89/doc
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
-  | bash -s -- --bin ~/下载/doc2md-v1.0.0-linux-x86_64
+  | bash -s -- --bin ~/下载/doc2md-v1.0.2-linux-x86_64
 ```
 
 仓库已经克隆到本地时，也可以就地跑脚本：

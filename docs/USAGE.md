@@ -67,7 +67,7 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/jessehoo89/doc
 
 ```bash
 curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
-  | bash -s -- --bin ~/下载/doc2md-v1.0.0-linux-x86_64
+  | bash -s -- --bin ~/下载/doc2md-v1.0.2-linux-x86_64
 ```
 
 管道模式下脚本自己把要用的东西取回来：先问 GitHub 要最新版本号（API → 302 跳转 →
@@ -88,7 +88,7 @@ sudo apt install -y libreoffice-writer libreoffice-calc   # 老式 .doc/.xls 才
 
 bash install.sh                    # 装到 ~/.local，装完就有 doc2md 命令
 bash install.sh --prefix /opt/doc2md
-bash install.sh --version v1.0.0   # 从 Release 拉指定版本（默认最新版）
+bash install.sh --version v1.0.2   # 从 Release 拉指定版本（默认最新版）
 bash install.sh --gh-proxy URL     # GitHub 慢时套加速前缀，如 https://gh-proxy.com/
 bash install.sh --source           # 强制源码方式（建 venv + 装依赖）
 bash install.sh --venv 目录        # 源码方式的虚拟环境放哪 / 复用哪个

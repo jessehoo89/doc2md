@@ -61,11 +61,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: 安装依赖（build_linux.sh 要求仓库内有 .venv）
+      - name: 安装依赖
         run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -r requirements.txt pyinstaller==6.22.3
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.22.3
       - name: 自检 tkinter（窗口版必须，缺了会打不出 doc2md-gui.exe）
         run: python -c "import tkinter, sys; print('tkinter %s / python %s' % (tkinter.TkVersion, sys.version))"
       - name: 构建应用 + 单文件安装程序

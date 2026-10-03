@@ -97,9 +97,9 @@ curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
 `--bin 文件`（用你已下好的 Release 程序）、`--source`（改成 git clone 源码安装）、
 `--uninstall`。全部参数与环境变量见[使用说明](docs/USAGE.md#linux--macos一条命令--一键脚本--源码)。
 
-现成程序是在较新的系统上打包的，本机 glibc 比它旧时会报 `GLIBC_2.xx not found` 跑不起来
-（Debian 12 就是这种情况）。脚本遇到会**自动改用源码安装**重来一遍（需要 git 与
-Python 3.11+），也可以自己加 `--source`。
+现成程序按 glibc 2.36 链接（在 Debian 12 上打包），Debian 12 / Ubuntu 23.04 及更新的系统
+直接可用；更旧的系统会报 `GLIBC_2.xx not found`，脚本遇到会**自动改用源码安装**重来一遍
+（需要 git 与 Python 3.11+），也可以自己加 `--source`。
 
 国内直连 GitHub 常常很慢甚至卡死（脚本自己取程序那段也一样）。这时套个加速前缀，
 取脚本和后面下程序都走这条通道：

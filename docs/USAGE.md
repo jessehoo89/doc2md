@@ -76,10 +76,10 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/jessehoo89/doc
 一并铺到程序旁边。下载不动、或你自己加了 `--source`，就换成 `git clone` 到
 `<前缀>/share/doc2md-src/` 走源码安装（需要 git 与 Python 3.11+）。
 
-现成程序是在较新的系统上打包的，本机 glibc 比它旧时会报 `GLIBC_2.xx not found` 跑不起来
-（Debian 12 即如此，CI 用的 Ubuntu 24.04 是 glibc 2.39）。脚本装完会跑一次
-`doc2md --version` 自检，跑不起来就**自动改用源码安装**重来（前提是本机有 git 与
-Python 3.11+），并把没用的二进制删掉；两者都不具备时会明确报错让你加 `--source`。
+现成程序按 glibc 2.36 链接（在 Debian 12 容器里打包），Debian 12 / Ubuntu 23.04 及更新的系统
+直接可用；更旧的系统会报 `GLIBC_2.xx not found`。脚本装完会跑一次 `doc2md --version`
+自检，跑不起来就**自动改用源码安装**重来（前提是本机有 git 与 Python 3.11+），并把没用的
+二进制删掉；两者都不具备时会明确报错让你加 `--source`。
 
 一键脚本（仓库已经在手边时）：
 

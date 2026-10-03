@@ -20,15 +20,27 @@ permissions:
 jobs:
   linux:
     name: Linux 二进制（onedir + onefile）
+    # 在 Debian 12 容器里打包：产物按 glibc 2.36 链接，能跑在 Debian 12 / Ubuntu 23.04 及更新的系统上。
+    # （之前在 ubuntu-latest＝24.04、glibc 2.39 上打包，产物要求 glibc ≥ 2.38，
+    #   Debian 12 上直接 "GLIBC_2.38 not found" —— install.sh 现在会自检并自动改源码安装兜底。）
+    # 容器注意：① 基础镜像没 git，checkout 在容器里执行，必须先装；
+    #           ② Debian 无 `python` 命令，用 `python3`；③ zip / tkinter 也要自己装。
     runs-on: ubuntu-latest
+    container: debian:12
     steps:
+      - name: 装基础工具（checkout 要 git；打包要 zip、tkinter、编译工具）
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git zip \
+            python3 python3-venv python3-dev python3-tk \
+            build-essential patchelf
+          python3 --version
+          python3 -c "import tkinter; print('tkinter', tkinter.TkVersion)"
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
       - name: 安装依赖（build_linux.sh 要求仓库内有 .venv）
         run: |
-          python -m venv .venv
+          python3 -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -r requirements.txt pyinstaller==6.22.3
       - name: 打包（两种形态）

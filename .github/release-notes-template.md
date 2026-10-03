@@ -26,6 +26,7 @@ doc2md.exe convert <文件或目录>
 
 ### 环境要求
 
+- Linux：单文件版与 onedir 版按 glibc 2.36 链接（在 Debian 12 上打包），Debian 12 / Ubuntu 23.04 及更新的系统直接可用；更旧的系统会报 `GLIBC_2.xx not found`，请用仓库里的 `install.sh --source` 源码安装（需要 Python 3.11+）
 - Linux：老式 `.doc` / `.xls` 需要系统装了 LibreOffice（`sudo apt install libreoffice-writer libreoffice-calc`）；缺了只影响这两种格式，其余照常
 - Windows：老式 `.doc` / `.xls` 走 Office COM，需装 Office
 - 扫描件 PDF 转文字走云端 OCR，需要在 `.env` 填入 token；不填则自动跳过 OCR，其余格式不受影响

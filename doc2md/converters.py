@@ -236,30 +236,56 @@ def _ensure_layout(use_layout: bool) -> None:
         pass
 
 
-def pdf_to_markdown(src: Path, page_chunk: int = 50, use_layout: bool = False) -> str:
-    """文本型 PDF → Markdown，走 pymupdf4llm。大文件分块以免内存峰值。
+def pdf_to_markdown(
+    src: Path,
+    page_chunk: int = 50,
+    *,
+    engine: str = "layout",
+    use_layout: bool | None = None,
+) -> str:
+    """文本型 PDF → Markdown。
 
-    关于 use_layout：pymupdf4llm 1.28 导入时就把 ONNX 版面模型打开了，而且
-    **传 False 关不掉它**（详见函数体内注释）。这个参数只有 True 才有实际动作，
-    即"确保开启"；保留它只是为了调用方语义清晰、以及将来真要切换时有个入口。
-    实测开模型慢 4~6 倍，但文档层级（标题树）完整得多。
+    两档引擎（由 config.pdf_engine 选；允许值与默认值见 config.PDF_ENGINES）：
+      * "rule"（默认）—— 走 vendor/ZhDocParser 的 PdfExtractor（纯规则、零模型、
+                          **不 import pymupdf4llm**）：按 字号/粗体/坐标 + 中文编号
+                          正则 + `page.find_tables()` 几何表格还原结构。
+                          中文公文/国标上标题识别比模型更准，实测快约 15 倍。
+                          接入层见 doc2md/pdf_zhdoc.py。
+      * "layout"       —— pymupdf4llm + ONNX 版面模型，标题层级由模型给；
+                          复杂版面更稳，但慢十几倍。已按 layout 档转出的语料想看
+                          新引擎效果，要跑 `run --redo-engine pdf-text` 重转。
 
-    注意：很多"文本型"PDF 其实是扫描件 + OCR 文本层（可搜索 PDF），文本层里
-    每个视觉行末尾都是硬换行，pymupdf4llm 对中文不会合并，会产出"一行一段"。
-    因此这里统一做一次中文段落重组（merge_pdf_lines）。
+    关于 use_layout（已废弃）：pymupdf4llm 1.28 在 **import 那一刻**就 activate 了
+    版面模型，模块级 `_use_layout` 默认为 True，所以传 False 是**关不掉**的 ——
+    这个参数历史上只有 True 才有动作（"确保开启"）。现在改由 engine 决定走哪条路，
+    本参数仅为兼容旧调用保留，传什么都忽略。
+
+    注意：很多"文本型"PDF 其实是扫描件 + OCR 文本层（可搜索 PDF），文本层里每个
+    视觉行末尾都是硬换行。两档引擎对中文都不会自动合并，会产出"一行一段"，因此
+    最后都统一做一次中文段落重组（merge_pdf_lines）。
     """
+    from .config import normalize_pdf_engine
+
+    # 按「只有明确写了 layout 才走模型档」来分派 —— 于是传进来的值无论是 None、
+    # 空串、大小写不一还是拼错，都会落到默认档（rule），不会出现
+    # 「配置写错就悄悄走了那条慢十几倍的路」这种静默劣化。
+    if normalize_pdf_engine(engine) != "layout":
+        from .pdf_zhdoc import pdf_to_markdown_zhdoc
+
+        return pdf_to_markdown_zhdoc(src)
+
     import pymupdf
     import pymupdf4llm
 
     from .detect import silence_mupdf
 
     silence_mupdf()
-    # 重要：不要为了"提速"而去关版面模型。
+    # 重要：layout 档**不要**为了"提速"而去关版面模型 —— 关不掉，而且关了会丢结构。
     #
     # pymupdf4llm 1.28 里 `import pymupdf4llm` 就会 activate 版面模型，模块级
-    # _use_layout 默认为 True。所以下面只在显式要求时才切全局状态 —— 传 False
-    # 时**什么都不做**，等于沿用「开」。注意这意味着 config 的 pdf_use_layout
-    # 是个单向开关，置 false 关不掉它（见 config.example.json 里的说明）。
+    # `_use_layout` 默认为 True；`converters` 只在 True 时才调 `use_layout(True)`，
+    # 传 False 什么都不做。所以要换掉这条路径只有两条路：改代码（即本项目的
+    # `pdf_engine="rule"`），或者装一个行为不同的版本 —— 改配置是没用的。
     #
     # 为什么不干脆关掉：关掉会走 helpers.pymupdf_rag 的老路径，快 4~6 倍，正文
     # 字数甚至略多（约 +3%），但**文档层级被压平**。2026-10-03 用真实语料实测
@@ -267,12 +293,13 @@ def pdf_to_markdown(src: Path, page_chunk: int = 50, use_layout: bool = False) -
     #     开：100551 字 / 214 个标题 / 60.5s     ← `1 范围`、`3.1 术语` 都在
     #     关：115684 字 /  28 个标题 / 10.3s     ← 小节标题变成普通正文行
     # 两边共有的标题只有 26 个 —— 也就是说关掉后基本都是顶层标题，子节全平了。
-    # 入库 / 检索靠的就是这个层级，所以默认保持开启，用速度换结构。
+    # 入库 / 检索靠的就是这个层级，所以 layout 档保持开启，用速度换结构。
+    #
+    # 想要"快 + 结构"就用 `pdf_engine="rule"`（纯规则引擎），不要再动这个开关。
     #
     # （旧注释曾记「关掉会解析出空内容或大量丢失，如 GB 50028 2577 字 vs 69699 字」，
     #   与上述实测不符 —— 那个数字可能来自扫描件/异常样本。以本段实测为准。）
-    if use_layout:
-        _ensure_layout(True)
+    _ensure_layout(True)
     doc = pymupdf.open(str(src))
     try:
         total = doc.page_count

@@ -41,6 +41,64 @@ DEFAULT_BASE_URL = {
     "vlm": "https://api.siliconflow.cn/v1",
 }
 
+# ---- 文本型 PDF 的提取引擎（config.pdf_engine）--------------------------------
+# 两个允许值，**默认 rule**：
+#   rule   —— vendor/ZhDocParser 的纯规则提取器（零模型、不 import pymupdf4llm）。
+#             中文公文/国标上更快也更准：10 页公文实测 1.67 CPU秒 / 22 个标题，
+#             而 layout 档 12.83 CPU秒 / 2 个标题。代价是认不出无边框表格（内容不丢，
+#             退化成"标题 + 正文"）、复杂版面（杂志/海报）可能输给模型。
+#   layout —— pymupdf4llm + 约 49MB ONNX 版面模型。项目原有行为，复杂版面更稳，
+#             但慢十几倍，且中文公文的标题层级明显不如 rule。
+# 注意：两档产出的 md **结构不同**，同一批语料不要混用。
+PDF_ENGINES: tuple[str, ...] = ("rule", "layout")
+PDF_ENGINE_DEFAULT = "rule"
+
+
+def normalize_pdf_engine(value: Any) -> str:
+    """把 pdf_engine 归一化成允许值；认不出来的一律退回默认（rule）。
+
+    宽容处理是必须的：老 config.json 里可能出现 "Layout"、带空格、甚至布尔
+    （历史上另有一个 `pdf_use_layout: true` 的写法）。**绝不能因为一个不认识的值
+    就让整份配置加载失败** —— 那等于让一个纯提取策略选项把程序整个卡住。
+    """
+    text = str(value or "").strip().lower()
+    return text if text in PDF_ENGINES else PDF_ENGINE_DEFAULT
+
+
+# ---- 要转换的扩展名 ---------------------------------------------------------
+# 缺这个键时必须回退到这个全集，**不能是空列表**：空列表的含义是"什么都别转"，
+# 而用户少写一个键就会得到一个静默失效的工具 —— `run` 报"待处理 0 个文件"、
+# `convert` 报"格式不支持"，两条提示都指不到真正的原因。
+DEFAULT_WATCH_EXTENSIONS: tuple[str, ...] = (
+    ".doc", ".docx", ".wps", ".xls", ".xlsx", ".et", ".pdf",
+)
+
+
+def normalize_extensions(values: Any) -> list[str]:
+    """把扩展名列表归一成小写、带点的形式，并丢掉无效项。
+
+    容忍 `.PDF` / `pdf` / ` pdf ` / 单个字符串（而不是列表）这几种写法 ——
+    扩展名是手写配置里最容易写飘的一项，而写飘的后果是**静默不匹配**
+    （文件就在眼前，工具却说"格式不支持"）。
+    """
+    if isinstance(values, str):          # 写成 "watch_extensions": ".pdf" 的情况
+        values = [values]
+    if not isinstance(values, (list, tuple)):
+        return []
+    out: list[str] = []
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        s = v.strip().lower()
+        if not s:
+            continue
+        if not s.startswith("."):
+            s = "." + s
+        if s not in out:
+            out.append(s)
+    return out
+
+
 # 凭据文件：与本文件同目录的 .env，集中存放各云端 OCR 的 Token。
 # 这样 Token 不必写进 config.json（config.json 常被分享/备份/贴日志）。
 # 可用环境变量 DOC2MD_ENV_FILE 指向别处；设为 none/off/0/- 表示完全不读该文件。
@@ -387,7 +445,7 @@ def env_template_text() -> str:
         "# 留空＝不启用对应后端，不影响其它后端。",
         "# 取值优先级：系统环境变量 > 本文件 > config.json 里的 token 字段。",
         "#",
-        "# 也可以完全不碰这个文件 —— 直接打开图形界面，用「填写云端 OCR Token」按钮填。",
+        "# 也可以完全不碰这个文件 —— 打开图形界面，用「设置…」里的「云端 OCR Token」页填。",
         "",
     ]
     for f in CRED_FIELDS:
@@ -438,8 +496,8 @@ def dismiss_token_prompt(path: str | Path | None = None) -> Path:
         return p
     lines = old.splitlines()
     if not any(ln.strip() for ln in lines):
-        lines = ["# 云端 OCR 凭据文件（还没填过 Token；要填请用图形界面的"
-                 "「填写云端 OCR Token…」按钮）", ""]
+        lines = ["# 云端 OCR 凭据文件（还没填过 Token；要填请用图形界面"
+                 "「设置…」里的「云端 OCR Token」页）", ""]
     if lines and lines[-1].strip():
         lines.append("")
     lines.append(_TOKEN_PROMPT_MARK)
@@ -614,7 +672,8 @@ class Config:
     roots: list[str] = field(default_factory=list)
     exclude_dir_names: list[str] = field(default_factory=list)
     sensitive_markers: list[str] = field(default_factory=list)
-    watch_extensions: list[str] = field(default_factory=list)
+    watch_extensions: list[str] = field(
+        default_factory=lambda: list(DEFAULT_WATCH_EXTENSIONS))
     image_extensions: list[str] = field(default_factory=list)
     keep_original: bool = True
     overwrite_existing_md: str = "skip"
@@ -625,8 +684,18 @@ class Config:
     # PDF 改走 OCR 重新识别（扫描件自带的 OCR 文本层不可靠，见 detect.pdf_text_trust）
     pdf_trust_check: bool = True
     shield_sensitive_for_ocr: bool = True
-    # pymupdf4llm 的 ONNX 版面模型：会拉起子进程，且在 GBK 环境下有已知
-    # 编码 bug（stderr 刷 UnicodeDecodeError）并慢十几倍。默认关闭。
+    # ---- 文本型 PDF 走哪个引擎（允许值与默认值见模块顶部 PDF_ENGINES）----
+    #   "rule"（默认）—— vendor/ZhDocParser 的 PdfExtractor（纯规则、零模型、
+    #                    **不 import pymupdf4llm**），接入层见 doc2md/pdf_zhdoc.py。
+    #                    中文公文/国标上标题识别比模型准，且快十几倍。
+    #   "layout"      —— pymupdf4llm + 49MB ONNX 版面模型，复杂版面更稳但慢。
+    # 归一化在 load_config 里做（normalize_pdf_engine），认不出的值退回默认，
+    # 不会让整份配置加载失败。改这个值不会改动已转出的 md —— files 表里两档
+    # 记的都是 engine="pdf-text"，想按新引擎重转得跑 `run --redo-engine pdf-text`。
+    pdf_engine: str = PDF_ENGINE_DEFAULT
+    # 【已废弃】旧开关。pymupdf4llm 1.28 导入时就把版面模型打开，且**传 False 关不掉**，
+    # 所以本字段历史上是"置 true / false 都走 layout"的单向开关。现由 pdf_engine
+    # 决定一切，本字段仅为兼容老 config.json 保留，不再有任何效果。
     pdf_use_layout: bool = False
     max_excel_rows: int = 2000
     max_excel_cols: int = 60
@@ -857,8 +926,11 @@ def load_config(path: str | Path | None = None) -> Config:
         roots=data.get("roots", []),
         exclude_dir_names=data.get("exclude_dir_names", []),
         sensitive_markers=data.get("sensitive_markers", []),
-        watch_extensions=data.get("watch_extensions", []),
-        image_extensions=data.get("image_extensions", []),
+        watch_extensions=(
+            normalize_extensions(data.get("watch_extensions"))
+            or list(DEFAULT_WATCH_EXTENSIONS)
+        ),
+        image_extensions=normalize_extensions(data.get("image_extensions")),
         keep_original=data.get("keep_original", True),
         overwrite_existing_md=data.get("overwrite_existing_md", "skip"),
         output=output,
@@ -866,6 +938,7 @@ def load_config(path: str | Path | None = None) -> Config:
         text_pdf_probe_pages=data.get("text_pdf_probe_pages", 5),
         pdf_trust_check=data.get("pdf_trust_check", True),
         shield_sensitive_for_ocr=data.get("shield_sensitive_for_ocr", True),
+        pdf_engine=normalize_pdf_engine(data.get("pdf_engine")),
         pdf_use_layout=data.get("pdf_use_layout", False),
         max_excel_rows=data.get("max_excel_rows", 2000),
         max_excel_cols=data.get("max_excel_cols", 60),

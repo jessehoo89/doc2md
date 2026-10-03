@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 
-import fitz
+import pymupdf as fitz
 
 from zhdocparser.extractors.base import BaseExtractor
 from zhdocparser.schemas import Document, DocumentMetadata, Page, Section, Table
@@ -184,6 +184,14 @@ class PdfExtractor(BaseExtractor):
         text_dict = page.get_text("dict")
         lines: list[PdfLine] = []
 
+        # PyMuPDF 的 get_text() 返回的是**未旋转**坐标，而 page.rect 是旋转之后的
+        # 显示尺寸。rotation != 0 的 PDF（横向存储 + 纵向显示）并不罕见 —— 例如
+        # 由 WPS/Word 导出的红头文件。此时行 bbox 与 page_width/page_height 不在
+        # 同一尺度上：「整行宽度 >= 页宽 * 0.65」「分栏间隙」这类判断会全线错位，
+        # 把单栏正文误判成多栏并重排出完全错误的阅读顺序（正文被排到标题前面）。
+        # 这里统一把 bbox 归一到显示坐标系，与 page.rect 保持一致。
+        to_display = page.rotation_matrix if page.rotation else None
+
         for block in text_dict.get("blocks", []):
             if block.get("type") != 0:
                 continue
@@ -197,6 +205,8 @@ class PdfExtractor(BaseExtractor):
                         for span in spans
                     )
                     bbox = tuple(line.get("bbox", (0.0, 0.0, 0.0, 0.0)))
+                    if to_display is not None:
+                        bbox = tuple(fitz.Rect(bbox) * to_display)
                     lines.append(
                         PdfLine(
                             text=line_text,
@@ -361,9 +371,14 @@ class PdfExtractor(BaseExtractor):
             (1, r"^[一二三四五六七八九十]+[、.]"),
             (2, r"^（[一二三四五六七八九十0-9]+）"),
             (2, r"^\([一二三四五六七八九十0-9]+\)"),
-            (2, r"^\d+\.\d+\s*"),
-            (2, r"^\d+[、.]"),
-            (3, r"^\d+\.\d+\.\d+\s*"),
+            # 更具体的模式必须排在更宽泛的前面：`\d+\.\d+\.\d+` 先于
+            # `\d+\.\d+`，`\d+\.\d+` 先于 `\d+[、.]`。原顺序里
+            # `^\d+[、.]` 排在前面，`1.1.1 xxx` 会被它的前缀 `1.` 抢先匹配，
+            # 于是三级标题被降级成二级；`^\d+[、.]` 也会把 `1.5 倍…` 这类
+            # 正文误判成编号标题，故加 `(?!\d)` 排除小数。
+            (3, r"^\d+\.\d+\.\d+(?!\d)"),
+            (2, r"^\d+\.\d+(?!\d)"),
+            (2, r"^\d+[、.](?!\d)"),
             (3, r"^[①②③④⑤⑥⑦⑧⑨⑩]"),
         ]
         for level, pattern in patterns:

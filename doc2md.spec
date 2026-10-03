@@ -89,6 +89,28 @@ hiddenimports = [
 hiddenimports += collect_submodules("doc2md")
 hiddenimports += ["gui", "launcher"]
 
+# ---- vendor 子项目：ZhDocParser（纯规则 PDF 结构还原）------------------------
+# 两件必须做的事，少一件打出来的包就跑不了 rule 档：
+#   1. pathex 指到 vendor/ZhDocParser —— 它不在默认搜索路径上，源码态靠
+#      doc2md/pdf_zhdoc.py 里运行时插 sys.path，打包态必须由这里告诉分析器；
+#   2. 显式列出要用的模块 —— 接入层是在**函数体内** import 的，静态分析对
+#      函数体内的 import 不够稳（同 gui/launcher 的处理）。
+# 只列 PDF 链路真正需要的：不列 zhdocparser.api / app / cli，它们的 fastapi /
+# uvicorn / typer 就不进包；不列 extractors.factory，python-docx / lxml 也不进包。
+VENDOR_ZH = ROOT / "vendor" / "ZhDocParser"
+pathex = [str(ROOT)]
+if VENDOR_ZH.is_dir():
+    pathex.append(str(VENDOR_ZH))
+    hiddenimports += [
+        "zhdocparser",
+        "zhdocparser.schemas",
+        "zhdocparser.schemas.document",
+        "zhdocparser.extractors",
+        "zhdocparser.extractors.base",
+        "zhdocparser.extractors.pdf_extractor",
+    ]
+
+
 # ---- 确定用不到的，排掉以减小体积 ----
 # 注意：**不要**排 tkinter —— 窗口版要用它。
 excludes = [
@@ -101,7 +123,7 @@ excludes = [
 
 a = Analysis(
     ["app.py"],
-    pathex=[str(ROOT)],
+    pathex=pathex,
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

@@ -36,7 +36,7 @@ _HOT_FIELDS = (
     "min_text_chars_per_page",
     "text_pdf_probe_pages",
     "shield_sensitive_for_ocr",
-    "pdf_use_layout",
+    "pdf_engine",
     "max_excel_rows",
     "max_excel_cols",
     "excel_sheet_limit",

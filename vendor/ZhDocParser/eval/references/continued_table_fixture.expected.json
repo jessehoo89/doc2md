@@ -1,0 +1,17 @@
+{
+  "title": "Quarterly Report",
+  "doc_type": "report",
+  "page_count": 2,
+  "section_count": 2,
+  "table_count": 1,
+  "chunk_count": 3,
+  "first_table_continued": true,
+  "first_table_source_pages": [1, 2],
+  "first_table_rows": [
+    ["Region", "Value"],
+    ["North", "120"],
+    ["South", "95"],
+    ["East", "88"],
+    ["West", "102"]
+  ]
+}

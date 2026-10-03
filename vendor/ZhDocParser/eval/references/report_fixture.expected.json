@@ -1,0 +1,9 @@
+{
+  "title": "Quarterly Analysis Report",
+  "doc_type": "report",
+  "page_count": 1,
+  "section_count": 1,
+  "table_count": 0,
+  "chunk_count": 1,
+  "first_section_content": "Left column line 1\nLeft column line 2\nRight column line 1\nRight column line 2"
+}

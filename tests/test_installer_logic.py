@@ -129,9 +129,9 @@ for name in ("doc2md.exe", "doc2md-gui.exe"):
           not has_marker(p, b"requireAdministrator"),
           "被安装的程序要求提权了：普通用户双击会一直被 UAC 拦")
 
-print("\n[4] 卸载脚本的提权方式")
+print("\n[4] 卸载入口")
 uni = ROOT / "installer" / "uninstall.bat"
-check("uninstall.bat 存在", uni.is_file())
+check("uninstall.bat 仍作为兜底保留", uni.is_file())
 if uni.is_file():
     text = uni.read_text(encoding="utf-8", errors="replace")
     check("uninstall.bat 会自我提权（Program Files 下删除需要管理员）",
@@ -139,6 +139,23 @@ if uni.is_file():
     check("uninstall.bat 正文纯 ASCII（cmd 代码页安全）",
           all(ord(c) < 128 for c in text),
           "含非 ASCII 字符，双击可能乱码")
+
+# 注册表里的 UninstallString 必须指向卸载 exe —— 用户要的是「点一下出界面」，
+# 不是「弹一个 cmd 黑框」。这里只做静态断言：真写注册表要动 HKLM，测试不该碰。
+ia_src = (ROOT / "installer" / "installer_app.py").read_text(encoding="utf-8")
+check("UninstallString 指向 uninstall.exe（图形界面卸载）",
+      'dest / "uninstall.exe"' in ia_src,
+      "注册表里还指着 bat，控制面板点「卸载」会弹黑框")
+check("不再把 uninstall.bat 写进 UninstallString",
+      'setv("UninstallString", f\'"{dest / "uninstall.bat"}"\')' not in ia_src)
+check("载荷里带 uninstall.exe（安装目录里就有一份）",
+      '"uninstall.exe"' in (ROOT / "make_installer.py").read_text(encoding="utf-8"))
+
+print("\n[5] 安装完成对话框不再写「下一步」清单")
+check("完成对话框里没有「下一步：」编号清单",
+      "下一步：" not in ia_src and "1. 编辑 config.json" not in ia_src,
+      "配置与 Token 现在都在 GUI 的「设置…」里，别再让用户去手改文件")
+check("完成对话框指向图形界面的「设置…」", "设置…" in ia_src)
 
 print()
 print("=" * 74)

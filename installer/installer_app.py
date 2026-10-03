@@ -12,7 +12,10 @@ Python 标准库 + PyInstaller，**零外部工具依赖**。
 --------
 * 载荷 zip 里的内容 = 目标安装目录的内容（`doc2md.exe` / `doc2md-gui.exe` /
   `_internal/` / `README.md` / `LICENSE` / `config.example.json` / `.env.example` /
-  `uninstall.bat`）。
+  `uninstall.exe` / `uninstall.bat`）。
+* **卸载入口是 `uninstall.exe`**（注册表 `UninstallString` 指向它，图形界面）；
+  `uninstall.bat` 只是兜底保留（万一 exe 被安全软件拦下）。两个都由
+  「卸载程序」那套代码/脚本产出，见 `installer/uninstaller.spec`。
 * 载荷里**不含** `config.json` / `.env` / `state.db`：这三样是用户数据，
   安装时只在"不存在"时补模板，升级重装不会覆盖。
 * **通过 exe 清单强制提权**（manifest 里写 `requireAdministrator`，见
@@ -368,11 +371,20 @@ def bootstrap_user_files(dest: Path, on_step=None) -> list[str]:
 
 
 def write_registry(dest: Path) -> bool:
-    """写入"添加/删除程序"条目。需要管理员，失败不致命。"""
+    """写入"添加/删除程序"条目。需要管理员，失败不致命。
+
+    卸载命令优先指向 ``uninstall.exe``（图形界面、可报错），只有载荷里没有它时才退回
+    ``uninstall.bat``。用绝对路径写死：条目登记的是**这个**安装目录，不能靠 %PATH%。
+    """
     try:
         import winreg
     except ImportError:  # pragma: no cover
         return False
+
+    unins_exe = dest / "uninstall.exe"
+    unins_bat = dest / "uninstall.bat"
+    unins = unins_exe if unins_exe.is_file() else unins_bat
+
     try:
         with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, UNINSTALL_KEY) as k:
             def setv(name, value, typ=winreg.REG_SZ):
@@ -382,8 +394,8 @@ def write_registry(dest: Path) -> bool:
             setv("DisplayVersion", APP_VERSION)
             setv("Publisher", PUBLISHER)
             setv("InstallLocation", str(dest))
-            setv("UninstallString", f'"{dest / "uninstall.bat"}"')
-            setv("QuietUninstallString", f'"{dest / "uninstall.bat"}" /S')
+            setv("UninstallString", f'"{unins}"')
+            setv("QuietUninstallString", f'"{unins}" /S')
             setv("DisplayIcon", str(dest / "doc2md-gui.exe"))
             setv("NoModify", 1, winreg.REG_DWORD)
             setv("NoRepair", 1, winreg.REG_DWORD)
@@ -580,15 +592,16 @@ def run_gui(default_dir: Path, no_shortcuts: bool) -> int:
             extra.append("已生成：" + "、".join(res["made"]))
         if not res["registry"]:
             extra.append("（未能写入卸载登记，可能需要管理员权限）")
+        # 刻意不写"下一步 1/2/3"：配置与云端 OCR Token 现在都在图形界面的
+        # 「设置…」窗口里，让用户去手改 config.json / .env 反而是绕远路。
         messagebox.showinfo(
             "安装完成",
             f"已安装到：\n{res['dir']}\n\n"
             f"{os.linesep.join(extra)}\n\n"
-            "下一步：\n"
-            "1. 编辑 config.json，把 roots 改成你的语料目录\n"
-            "2. 在 .env 里填云端 OCR 的 Token（不填也能转，只是扫描件走不了云端）\n"
-            "3. 双击 doc2md-gui.exe 图形界面，或 doc2md.exe 用命令行\n\n"
-            f"说明文档：{res['readme']}",
+            "双击 doc2md-gui.exe 打开图形界面；配置与云端 OCR Token 都在\n"
+            "界面里的「设置…」（Ctrl+,）中修改。\n\n"
+            f"说明文档：{res['readme']}\n"
+            f"卸载：{res['dir']}\\uninstall.exe",
             parent=root,
         )
         install_btn.configure(state="disabled")

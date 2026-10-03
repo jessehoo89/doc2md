@@ -10,10 +10,12 @@
 流程
 ----
     1) 构建 dist/doc2md/            ← PyInstaller + doc2md.spec（两个 exe 共享 _internal）
-    2) 直接打 zip build/doc2md-payload.zip
-       （exe + _internal + README + LICENSE + 示例配置 + uninstall.bat，无中间暂存目录）
-    3) 构建单文件安装程序            ← PyInstaller + installer/installer.spec，载荷内嵌
-    4) 产出 dist-installer/doc2md-安装程序.exe（并附一份裸载荷 zip）
+    2) 构建卸载程序 exe             ← PyInstaller + installer/uninstaller.spec（独立单文件）
+    3) 直接打 zip build/doc2md-payload.zip
+       （两个 exe + uninstall.exe + _internal + README + LICENSE + 示例配置 + uninstall.bat，
+        无中间暂存目录）
+    4) 构建单文件安装程序            ← PyInstaller + installer/installer.spec，载荷内嵌
+    5) 产出 dist-installer/doc2md-安装程序.exe（并附一份裸载荷 zip）
 
 参数
 ----
@@ -22,6 +24,8 @@
     --skip-app      跳过第 1 步（沿用现有 dist/doc2md，只重做载荷与安装程序）
     --clean         先删掉 build/ 与 dist/、dist-installer/ 再从头来（最彻底，也最慢）
     --no-installer  只做到第 1 步（等价于只跑应用打包）
+
+改完 installer/uninstall_app.py 不必加 `--force`：只有第 1 步会被跳过，第 2 步每次都重打。
 
 改完 `gui.py` / `doc2md/` 里任何代码都要 `--force`：否则安装包里内嵌的还是旧 exe，
 装出来会缺新功能（这个坑踩过 —— 界面上多了个按钮，安装版里却没有）。
@@ -45,6 +49,14 @@ PAYLOAD_ZIP = BUILD / "doc2md-payload.zip"
 DIST_INSTALLER = ROOT / "dist-installer"
 SETUP_ASCII = "doc2md-setup.exe"
 SETUP_FINAL = "doc2md-安装程序.exe"
+
+# 卸载程序：构建名是 ASCII（PyInstaller 的 name），进载荷后叫 uninstall.exe，
+# 也就是安装目录里用户看到的那个名字、注册表 UninstallString 指向的那个名字。
+UNINSTALLER_SPEC = ROOT / "installer" / "uninstaller.spec"
+UNINSTALLER_BUILD_NAME = "doc2md-uninstall.exe"
+UNINSTALLER_DIST = BUILD / "uninstaller"
+UNINSTALLER_EXE = UNINSTALLER_DIST / UNINSTALLER_BUILD_NAME
+UNINSTALLER_IN_PAYLOAD = "uninstall.exe"
 
 # 载荷里除 exe/_internal 之外，还要带上的仓库文件 → 目标名
 EXTRA_FILES = [
@@ -127,7 +139,7 @@ def run_pyinstaller(spec: Path, *, distpath: Path, workpath: Path) -> None:
 
 
 def build_app(*, force: bool = False) -> None:
-    step(1, 4, "构建应用 dist/doc2md（两个 exe + 共享 _internal）")
+    step(1, 5, "构建应用 dist/doc2md（两个 exe + 共享 _internal）")
     exes = [DIST_APP / "doc2md.exe", DIST_APP / "doc2md-gui.exe"]
     if all(p.is_file() for p in exes) and not force:
         log("[跳过] 两个 exe 已存在；要重打包请加 --force（或 --clean）")
@@ -150,6 +162,21 @@ def build_app(*, force: bool = False) -> None:
     log(f"[校验] {exes[0].name} / {exes[1].name} 均已生成")
 
 
+def build_uninstaller() -> None:
+    step(2, 5, "构建卸载程序 uninstall.exe（独立单文件）")
+    # 每次重打：它很小（~10MB），而且改了 uninstall_app.py 必须立刻生效 ——
+    # 不像第 1 步那样有"看到产物就跳过"的捷径，这里的跳过条件只有产物不存在。
+    run_pyinstaller(
+        UNINSTALLER_SPEC,
+        distpath=UNINSTALLER_DIST,
+        workpath=BUILD / "pyinstaller-uninstaller",
+    )
+    if not UNINSTALLER_EXE.is_file():
+        die(f"构建结束但没找到 {UNINSTALLER_EXE}")
+    mb = UNINSTALLER_EXE.stat().st_size / 1024 / 1024
+    log(f"[校验] {UNINSTALLER_EXE.name} 已生成（{mb:.1f} MB）")
+
+
 def payload_entries() -> list[tuple[Path, str]]:
     """列出载荷内容：``(源文件, zip 内相对路径)``。
 
@@ -164,6 +191,13 @@ def payload_entries() -> list[tuple[Path, str]]:
         if not src.is_file():
             die(f"载荷缺少必需项：{src}")
         entries.append((src, name))
+
+    # 卸载程序：必须是独立文件（不能用 _internal 里的东西），它要在安装目录被删的过程中
+    # 运行。少了它，注册表里的 UninstallString 会指向一个不存在的文件。
+    if not UNINSTALLER_EXE.is_file():
+        die(f"载荷缺少卸载程序：{UNINSTALLER_EXE}\n"
+            "  请先运行第 2 步（make_installer.py 的 build_uninstaller）")
+    entries.append((UNINSTALLER_EXE, UNINSTALLER_IN_PAYLOAD))
 
     internal = DIST_APP / "_internal"
     if not internal.is_dir():
@@ -183,7 +217,7 @@ def payload_entries() -> list[tuple[Path, str]]:
 
 
 def build_payload() -> None:
-    step(2, 4, "压缩内嵌载荷 doc2md-payload.zip")
+    step(3, 5, "压缩内嵌载荷 doc2md-payload.zip")
     if not DIST_APP.is_dir():
         die(f"缺少 {DIST_APP}，请先完成第 1 步")
 
@@ -205,7 +239,7 @@ def build_payload() -> None:
 
 
 def build_installer() -> None:
-    step(3, 4, "构建单文件安装程序（载荷内嵌）")
+    step(4, 5, "构建单文件安装程序（载荷内嵌）")
     # 不清空 dist-installer：PyInstaller 配 --noconfirm 会直接覆盖同名产物，
     # 不需要我们先删一遍（删除既慢又容易触发环境里的批量删除防护）。
     run_pyinstaller(
@@ -216,7 +250,7 @@ def build_installer() -> None:
 
 
 def finalize() -> None:
-    step(4, 4, "收尾：改成中文文件名并校验")
+    step(5, 5, "收尾：改成中文文件名并校验")
     src = DIST_INSTALLER / SETUP_ASCII
     if not src.is_file():
         die(f"没找到安装程序产物 {src}")
@@ -240,6 +274,9 @@ def finalize() -> None:
     log(f"  {dst.name} /S                   → 静默装到 C:\\Program Files\\doc2md")
     log(f"  {dst.name} /S /D=D:\\doc2md      → 静默装到指定目录")
     log(f"  {dst.name} /S /D=... /NOICONS   → 不建快捷方式")
+    log()
+    log(f"卸载：装完后安装目录里有 {UNINSTALLER_IN_PAYLOAD}（图形界面），")
+    log("      「设置 → 应用」里的条目也指向它；uninstall.bat 保留作兜底。")
 
 
 def main() -> int:
@@ -264,6 +301,7 @@ def main() -> int:
         log("\n[完成] --no-installer：只做到应用打包。")
         return 0
 
+    build_uninstaller()
     build_payload()
     build_installer()
     finalize()

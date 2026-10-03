@@ -26,10 +26,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: 安装依赖
+      - name: 安装依赖（build_linux.sh 要求仓库内有 .venv）
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller==6.22.3
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt pyinstaller==6.22.3
       - name: 打包（两种形态）
         run: bash build_linux.sh both
       - name: 整理产物（单文件二进制 + 多文件版 zip）
@@ -51,15 +52,20 @@ jobs:
   windows:
     name: Windows 可执行文件 + 单文件安装程序
     runs-on: windows-latest
+    # CI 控制台码页是 cp1252，脚本按中文 print 会 UnicodeEncodeError；强制解释器走 UTF-8
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: 安装依赖
+      - name: 安装依赖（build_linux.sh 要求仓库内有 .venv）
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller==6.22.3
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt pyinstaller==6.22.3
       - name: 自检 tkinter（窗口版必须，缺了会打不出 doc2md-gui.exe）
         run: python -c "import tkinter, sys; print('tkinter %s / python %s' % (tkinter.TkVersion, sys.version))"
       - name: 构建应用 + 单文件安装程序

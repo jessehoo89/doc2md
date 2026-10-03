@@ -61,6 +61,7 @@ from doc2md.config import (          # noqa: E402  （config/state 都是轻量�
     filled_aliases,
     load_config,
     mask_token,
+    normalize_pdf_engine,
     resolve_config_path,
     save_env_values,
     token_prompt_dismissed,
@@ -161,6 +162,14 @@ class Doc2MdApp:
         self.log(f"程序目录：{TOOL_DIR}")
         self.log(f"配置文件：{self.config_path}")
         self.log(f"云端 OCR Token：{describe_tokens()}")
+        if self.cfg is not None:
+            # 这几行原先是左侧「当前生效配置」面板的内容，那一栏已撤掉；
+            # 并入启动日志 —— 需要对照时看日志就行，不占首页版面。
+            self.log(f"文本型 PDF 引擎：{self.cfg.pdf_engine}"
+                     f"（{'纯规则提取' if self.cfg.pdf_engine == 'rule' else 'pymupdf4llm + ONNX 版面模型'}）")
+            self.log(f"后端链路：{describe_backends(self.cfg)}")
+            self.log(f"凭据文件：{describe_env_file(self.cfg)}")
+            self.log(f"状态库：{self.cfg.state_db}")
         self.log("提示：日志面板的内容与命令行版完全一致，可直接对照排查。\n")
 
         # 装机后第一次打开（凭据文件还不存在）直接把填写窗口弹出来，见 _maybe_prompt_tokens
@@ -219,13 +228,14 @@ class Doc2MdApp:
         self._build_toolbar()          # row 0
         self._build_body()             # row 1
         self._build_statusbar()        # row 2
+        self._fit_minsize_to_toolbar()
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self.root)
         m_file = tk.Menu(menubar, tearoff=0)
         m_file.add_command(label="保存配置", command=self._on_save, accelerator="Ctrl+S")
         m_file.add_separator()
-        m_file.add_command(label="填写云端 OCR Token…", command=self._on_tokens)
+        m_file.add_command(label="设置…", command=self._on_settings, accelerator="Ctrl+,")
         m_file.add_command(label="打开配置文件", command=self._open_config)
         m_file.add_command(label="打开凭据文件 (.env)", command=self._open_env)
         m_file.add_command(label="打开程序目录", command=lambda: self._open(TOOL_DIR))
@@ -246,6 +256,7 @@ class Doc2MdApp:
     def _build_toolbar(self) -> None:
         bar = ttk.Frame(self.root, padding=(10, 8, 10, 4))
         bar.grid(row=0, column=0, sticky="ew")
+        self._toolbar = bar
 
         def btn(text, cmd, *, primary=False, tip=""):
             b = ttk.Button(bar, text=text, command=cmd,
@@ -265,6 +276,26 @@ class Doc2MdApp:
         btn("查看统计", self.on_status)
         btn("重试失败", self.on_retry)
         btn("检测云端 OCR", self.on_ping)
+        btn("设置…", self._on_settings)
+        # 从左侧面板搬过来的：手工编辑完 config.json 后手边就能刷新，
+        # 不必再去翻菜单或重启程序。
+        btn("重新加载配置", self._on_reload_click)
+
+    def _fit_minsize_to_toolbar(self) -> None:
+        """把窗口最小宽度抬到「顶部按钮栏放得下」为止。
+
+        按钮栏是单行 pack，窗口比它窄时**不会换行**，右侧按钮直接被窗口边缘切掉。
+        实测 10 颗按钮要 1126px，而原先写死的 minsize 是 980px —— 最右边那颗
+        在最小窗口下根本看不见。这里按实际请求宽度兜住，以后加/删按钮自动跟着变，
+        不用回来手改数字；上限取屏幕宽度，免得在窄屏上把窗口钉得比屏幕还宽。
+        """
+        try:
+            self._toolbar.update_idletasks()
+            need = self._toolbar.winfo_reqwidth()
+            screen = self.root.winfo_screenwidth()
+        except Exception:
+            return
+        self.root.minsize(max(980, min(need, screen)), 640)
 
     def _build_body(self) -> None:
         pw = ttk.PanedWindow(self.root, orient="horizontal")
@@ -309,9 +340,9 @@ class Doc2MdApp:
     def _build_scroll_area(self, parent: ttk.Frame) -> None:
         """把左侧配置面板放进可滚动容器。
 
-        配置项（目录 / 输出 / 选项 / 摘要 / 一排按钮）加起来比 760px 高 ——
-        小窗口、笔记本屏或 150% 缩放下底部会被窗口边缘切掉，而且没法滚。
-        这里用 Canvas 套一层，内容超了就能滚。
+        左侧现在只剩三组（处理目录 / 输出方式 / 选项），默认窗口尺寸下放得下；
+        这一层是为**小窗口、笔记本屏或 150% 缩放**留的余地 —— 那些情况下
+        内容仍会被窗口下边缘切掉，而且没有这层就没法滚。
         """
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
@@ -330,10 +361,33 @@ class Doc2MdApp:
         inner = ttk.Frame(canvas)
         self._cfg_inner = inner
         win = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def _sync_scrollbar(*_a):
+            """内容没超高就把滚动条收起来。
+
+            左侧只剩三组配置后，默认窗口下它常年用不上 —— 留一条灰槽白占 16px，
+            还容易被当成"界面坏了"。内容一旦超高（小窗口 / 150% 缩放）自动回来。
+            """
+            try:
+                need = inner.winfo_reqheight()
+                avail = canvas.winfo_height()
+            except Exception:
+                return
+            if need > avail:
+                vsb.grid()
+            else:
+                if vsb.winfo_ismapped():
+                    canvas.yview_moveto(0)
+                vsb.grid_remove()
+
+        def _on_inner_configure(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            _sync_scrollbar()
+
+        inner.bind("<Configure>", _on_inner_configure)
         canvas.bind("<Configure>",
-                    lambda e: canvas.itemconfigure(win, width=e.width))
+                    lambda e: (canvas.itemconfigure(win, width=e.width),
+                               _sync_scrollbar()))
 
         def _wheel(e):
             # 内容没超高时不滚，避免用户以为界面卡住
@@ -425,45 +479,17 @@ class Doc2MdApp:
             ttk.Label(g3, text="    " + hint, style="Hint.TLabel").grid(
                 row=i * 2 + 1, column=0, sticky="w", pady=(0, 4))
 
-        # 配置摘要
-        g4 = ttk.LabelFrame(parent, text=" 当前生效配置 ", padding=8)
-        g4.grid(row=row, column=0, sticky="ew")
-        g4.columnconfigure(0, weight=1)
-        row += 1
-        self.lbl_chain = ttk.Label(g4, text="后端链路：—", wraplength=340, justify="left")
-        self.lbl_chain.grid(row=0, column=0, sticky="w")
-        self.lbl_cred = ttk.Label(g4, text="凭据文件：—", wraplength=340, justify="left",
-                                  style="Hint.TLabel")
-        self.lbl_cred.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.lbl_state = ttk.Label(g4, text="状态库：—", wraplength=340, justify="left",
-                                   style="Hint.TLabel")
-        self.lbl_state.grid(row=2, column=0, sticky="w", pady=(4, 0))
-
-        # 凭据入口：装完机第一件要干的事就是填 Token，所以单独给一行显眼位置。
-        # 注意**不放进 _cfg_widgets**：转换过程中也允许补填 Token（下一轮生效）。
-        g4b = ttk.Frame(parent)
-        g4b.grid(row=row, column=0, sticky="ew", pady=(8, 0))
-        row += 1
-        ttk.Button(g4b, text="填写云端 OCR Token…", style="Go.TButton",
-                   command=self._on_tokens).pack(side="left")
-        ttk.Button(g4b, text="检测云端 OCR", style="Tool.TButton",
-                   command=self.on_ping).pack(side="left", padx=6)
-
-        # 打开类动作
-        g5 = ttk.Frame(parent)
-        g5.grid(row=row, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(g5, text="保存配置", style="Tool.TButton",
-                   command=self._on_save).pack(side="left")
-        ttk.Button(g5, text="打开配置文件", style="Tool.TButton",
-                   command=self._open_config).pack(side="left", padx=6)
-        ttk.Button(g5, text="打开凭据文件", style="Tool.TButton",
-                   command=self._open_env).pack(side="left")
-        g6 = ttk.Frame(parent)
-        g6.grid(row=row + 1, column=0, sticky="ew", pady=(6, 0))
-        ttk.Button(g6, text="打开程序目录", style="Tool.TButton",
-                   command=lambda: self._open(TOOL_DIR)).pack(side="left")
-        ttk.Button(g6, text="重新加载配置", style="Tool.TButton",
-                   command=self._on_reload_click).pack(side="left", padx=6)
+        # 这里原本还有「当前生效配置」摘要栏 + 两组按钮（设置/检测云端 OCR、
+        # 保存配置/打开配置文件/打开凭据文件/打开程序目录/重新加载配置）。
+        # 全部撤掉了，理由是它们要么与「设置」窗口重复，要么与顶部按钮栏重复：
+        #   · 「设置…（含云端 OCR Token）」「检测云端 OCR」→ 顶部按钮栏已有同名按钮；
+        #   · 「保存配置」→ 每个动作（扫描/转换/监控）执行前都会先 _apply_form()
+        #     把界面写回 config.json，这个按钮没有存在的必要；菜单里的同名项保留；
+        #   · 「打开配置文件/凭据文件/程序目录」→ 低频动作，菜单 `文件` 里都有；
+        #   · 「重新加载配置」→ 移到顶部按钮栏「设置…」右边（改完 config.json
+        #     手边就能刷）；
+        #   · 「当前生效配置」摘要 → 信息并入启动日志（见 __init__ 里的几行 log）。
+        # 左侧现在只剩真正要经常调的三组：处理目录 / 输出方式 / 选项。
 
     def _mk_cfg_btn(self, parent, text, cmd) -> ttk.Button:
         b = ttk.Button(parent, text=text, style="Tool.TButton", command=cmd)
@@ -530,19 +556,17 @@ class Doc2MdApp:
         self._sync_form_from_config()
 
     def _reload_config(self) -> None:
+        """从磁盘重新读 config.json。
+
+        注意：**不要在这里回填任何界面控件**。左侧面板的展示由
+        `_sync_form_from_config()` 负责（它读的是原始 json，见那里的说明），
+        而调用方按需自行决定要不要回填 —— 例如设置窗口保存后就会两个都调。
+        """
         try:
             self.cfg = load_config(self.config_path)
         except Exception as e:
             self.cfg = None
-            self.lbl_chain.configure(text="后端链路：—")
-            self.lbl_cred.configure(text="凭据文件：—")
-            self.lbl_state.configure(text="状态库：—")
             messagebox.showerror(APP_TITLE, f"配置加载失败：\n{self.config_path}\n\n{e}")
-            return
-        cfg = self.cfg
-        self.lbl_chain.configure(text="后端链路：\n  " + describe_backends(cfg))
-        self.lbl_cred.configure(text="凭据文件：\n  " + describe_env_file(cfg))
-        self.lbl_state.configure(text=f"状态库：{cfg.state_db}\n日志目录：{cfg.log_dir}")
 
     def _raw(self) -> dict:
         return (self.cfg.raw if self.cfg is not None and isinstance(self.cfg.raw, dict) else {})
@@ -712,15 +736,15 @@ class Doc2MdApp:
                 p.write_text(env_template_text(), encoding="utf-8")
                 self.log(f"[提示] 已生成凭据文件模板：{p}\n"
                          f"        把各平台的 Token 填在等号右侧即可；"
-                         f"也可以直接用「填写云端 OCR Token…」界面来填。")
+                         f"也可以直接用「设置…」窗口的「云端 OCR Token」页来填。")
             except Exception as e:
                 messagebox.showerror(APP_TITLE, f"无法创建 {p}\n{e}")
                 return
         self._open(p)
 
-    # ---- 填写云端 OCR Token ----
+    # ---- 设置（云端 OCR Token 已并入设置界面）----
     def _maybe_prompt_tokens(self) -> None:
-        """没填过 Token 时，启动后直接把「填写 Token」窗口弹出来。
+        """没填过 Token 时，启动后直接把「设置」窗口打开到 Token 页。
 
         判定条件是「常用 Token 一个都没填」，**不是"文件不存在"** ——
         装机包会把 `.env.example` 复制成一份空的 `.env`，按文件存在与否判断就
@@ -735,203 +759,25 @@ class Doc2MdApp:
         env_path = env_file_path(self.config_path)
         if token_prompt_dismissed(env_path):
             return
-        self.log("[提示] 还没填过云端 OCR 的 Token，已打开设置窗口。\n"
+        self.log("[提示] 还没填过云端 OCR 的 Token，已打开设置窗口的「云端 OCR Token」页。\n"
                  "        不填也能转：docx/xlsx 和带文字层的 PDF 不依赖 OCR；"
                  "扫描件则会退化成只走 MinerU 免鉴权接口（不出插图、精度较低）。")
-        self._on_tokens(first_run=True)
+        self._on_settings("Token", first_run=True)
 
-    def _on_tokens(self, *, first_run: bool = False) -> None:
-        """「填写云端 OCR Token」窗口：读现状 → 改 → 写回 .env（立即生效）。
+    def _on_settings(self, tab: str | None = None, *, first_run: bool = False) -> None:
+        """打开统一的「设置」窗口。
 
-        键名、说明、模板一律取自 config.CRED_FIELDS 这唯一一份定义，
-        界面不另立一套文案，避免"界面能填、命令行不认"的漂移。
+        参数 tab 是要选中的页签名片段（如 "Token"）。首次启动的凭据提示走
+        `_on_settings("Token", first_run=True)` —— 也就是说 Token 的入口已经从首页
+        （顶部按钮栏 / 文件菜单）收进了设置界面，首页只留一个「设置…」。
+
+        first_run=True 时底部那颗取消按钮显示为「稍后再说」，点了会把
+        「以后再说」记号写进凭据文件，下次启动不再自动弹。
+
+        这里**不做 busy 检查**：转换进行中同样允许改设置、补填 Token，
+        改动对下一轮生效（Engine 每轮开始时才读一次 config）。
         """
-        env_path = env_file_path(self.config_path)
-        came_from = set((self.cfg.env_keys if self.cfg is not None else []) or [])
-
-        win = tk.Toplevel(self.root)
-        win.title("填写云端 OCR Token")
-        win.transient(self.root)
-        win.resizable(False, False)
-
-        outer = ttk.Frame(win, padding=14)
-        outer.grid(row=0, column=0, sticky="nsew")
-        outer.columnconfigure(0, weight=1)
-
-        head = ("这些 Token 决定扫描件能不能走云端 OCR。填完保存立即生效，不用重启程序。\n"
-                "留空＝不启用对应后端，不影响其它后端。Token 只写进本机凭据文件，"
-                "不会进版本库，也不会出现在日志里。")
-        ttk.Label(outer, text=head, style="Hint.TLabel", wraplength=560,
-                  justify="left").grid(row=0, column=0, sticky="w", pady=(0, 10))
-
-        rows: list[tuple[str, tk.StringVar]] = []
-
-        def add_row(parent: ttk.Frame, f, r: int) -> int:
-            """一个字段占两行：上行「名称 + 输入框 + 显示」，下行灰色说明。
-
-            不要排成「名称一行、输入框一行、说明一行」——三个字段就多出 3 行，
-            整个对话框会高到 690px，在 768p 笔记本上直接顶出屏幕。
-            """
-            secret = "TOKEN" in f.key or f.key.endswith("_KEY")
-            ttk.Label(parent, text=f.label).grid(row=r, column=0, sticky="w", padx=(0, 6))
-            var = tk.StringVar(value=(os.environ.get(f.key) or "").strip())
-            ent = ttk.Entry(parent, textvariable=var, width=42)
-            if secret:
-                ent.configure(show="*")
-            ent.grid(row=r, column=1, sticky="ew", padx=(0, 6))
-            if secret:
-                eye = tk.BooleanVar(value=False)
-                ttk.Checkbutton(parent, text="显示", variable=eye,
-                                command=lambda v=eye, e=ent:
-                                e.configure(show="" if v.get() else "*")
-                                ).grid(row=r, column=2, sticky="e")
-            note = f.hint
-            if f.where:
-                note += f"　申请：{f.where}"
-            if var.get() and f.key not in came_from:
-                note = "⚠ 当前值来自「系统环境变量」，它的优先级高于本文件，" \
-                       "在这里改不会生效（要改请改环境变量，或先把它删掉）。　" + note
-            ttk.Label(parent, text=" " + note, style="Hint.TLabel", wraplength=540,
-                      justify="left").grid(row=r + 1, column=0, columnspan=3,
-                                           sticky="w", pady=(0, 6))
-            rows.append((f.key, var))
-            return r + 2
-
-        g_common = ttk.LabelFrame(outer, text=" 常用（填了就能用云端 OCR） ", padding=10)
-        g_common.grid(row=1, column=0, sticky="ew")
-        g_common.columnconfigure(1, weight=1)
-        r = 0
-        for f in CRED_FIELDS:
-            if not f.advanced:
-                r = add_row(g_common, f, r)
-
-        g_adv = ttk.LabelFrame(outer, text=" 高级（一般不用改） ", padding=10)
-        g_adv.columnconfigure(1, weight=1)
-        show_adv = tk.BooleanVar(value=False)
-
-        def toggle_adv() -> None:
-            if show_adv.get():
-                g_adv.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-            else:
-                g_adv.grid_remove()
-            win.update_idletasks()
-
-        ra = 0
-        for f in CRED_FIELDS:
-            if f.advanced:
-                ra = add_row(g_adv, f, ra)
-        ttk.Checkbutton(outer, text="显示高级选项（自建服务地址、通用 VLM 兜底凭证）",
-                        variable=show_adv, command=toggle_adv
-                        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
-        g_adv.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        g_adv.grid_remove()
-
-        # 现有状态：凭据文件路径 + 各后端实际读到的凭据（脱敏）
-        info = ttk.LabelFrame(outer, text=" 当前状态 ", padding=10)
-        info.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        info.columnconfigure(0, weight=1)
-        lines = [f"凭据文件：{env_path}",
-                 f"填写情况：{describe_tokens()}"]
-        aliases = filled_aliases()
-        if aliases:
-            lines.append("注意：检测到别名 " + "、".join(aliases) + " 也有值。"
-                         "它的优先级与上面的规范名不一定相同，两个都填时请以「各后端实际凭据」为准。")
-        if self.cfg is not None:
-            lines.append("各后端实际凭据：")
-            lines += [f"    {ln}" for ln in describe_credentials(self.cfg)]
-        else:
-            lines.append("（配置未加载成功，无法列出后端）")
-        ttk.Label(info, text="\n".join(lines), style="Hint.TLabel", wraplength=560,
-                  justify="left").grid(row=0, column=0, sticky="w")
-
-        def collect() -> dict[str, str | None]:
-            updates: dict[str, str | None] = {}
-            for key, var in rows:
-                new = var.get().strip()
-                old = (os.environ.get(key) or "").strip()
-                # 没改过、且值本来来自系统环境变量（不在文件里）→ 不动文件，
-                # 免得把系统环境变量里的 Token 顺手抄进本机文件里
-                if new == old and (key not in came_from or new):
-                    continue
-                updates[key] = new
-            return updates
-
-        def save(*, then_ping: bool) -> None:
-            updates = collect()
-            if not updates:
-                self.log("[凭据] 没有需要保存的改动。")
-                win.destroy()
-                if then_ping:
-                    self.on_ping()
-                return
-            try:
-                save_env_values(updates, env_path)
-            except Exception as e:
-                messagebox.showerror(APP_TITLE, f"写入凭据文件失败：\n{env_path}\n\n{e}",
-                                     parent=win)
-                return
-            changed = [k for k, v in updates.items() if (v or "").strip()]
-            cleared = [k for k, v in updates.items() if not (v or "").strip()]
-            msg = f"[凭据] 已写入 {env_path}"
-            if changed:
-                msg += "\n        写入：" + "、".join(
-                    f"{k}={mask_token(os.environ.get(k, ''))}" for k in changed)
-            if cleared:
-                msg += "\n        置空：" + "、".join(cleared)
-            msg += "\n        已即时生效（无需重启）；当前 " + describe_tokens()
-            self.log(msg)
-            win.destroy()
-            self._reload_config()
-            if then_ping:
-                self.on_ping()
-
-        def cancel() -> None:
-            # 首次启动时点了「稍后再说」就落下记号，别每次开程序都弹一遍。
-            # 从菜单主动打开的情况（first_run=False）不记 —— 用户可能只是先看看。
-            if first_run:
-                try:
-                    dismiss_token_prompt(env_path)
-                except Exception:
-                    pass
-            win.destroy()
-
-        btns = ttk.Frame(outer)
-        btns.grid(row=5, column=0, sticky="ew", pady=(12, 0))
-        ttk.Button(btns, text="保存", style="Go.TButton",
-                   command=lambda: save(then_ping=False)).pack(side="left")
-        ttk.Button(btns, text="保存并检测连通性",
-                   command=lambda: save(then_ping=True)).pack(side="left", padx=6)
-        ttk.Button(btns, text="打开凭据文件", command=self._open_env).pack(side="left")
-        ttk.Button(btns, text="稍后再说", command=cancel).pack(side="right")
-
-        win.bind("<Escape>", lambda e: cancel())
-        win.bind("<Return>", lambda e: save(then_ping=False))
-        win.protocol("WM_DELETE_WINDOW", cancel)
-
-        if first_run:
-            note = ("\n提示：一个 Token 都不填也能用 —— docx / xlsx / 有文字层的 PDF "
-                    "本地就能转；\n只有扫描件（图片型 PDF、无文字层）才需要云端 OCR。")
-            self.log(note.strip())
-
-        # Windows 上给「刚建好、还没映射」的窗口设位置会被丢掉 —— 实测停在屏幕
-        # 左上角 (0,0)，算出来的偏移量完全没生效。所以等窗口真正出现（<Map>）之后
-        # 再钉一次，另外补两次延迟兜底，覆盖"窗口管理器先摆、后收到请求"的顺序差异。
-        # 钉成功就摘掉钩子：否则用户把窗口拖到一边后，任何一次重映射都会把它拽回中间。
-        placed = {"ok": False}
-
-        def place(*_a) -> None:
-            if placed["ok"]:
-                return
-            self._center_on_parent(win)
-            if win.winfo_x() > 1 or win.winfo_y() > 1:      # 位置确实生效了
-                placed["ok"] = True
-
-        place()
-        win.bind("<Map>", place, add="+")
-        for _delay in (30, 200):
-            win.after(_delay, place)
-        win.grab_set()
-        self.root.wait_window(win)
+        SettingsDialog(self, tab=tab, first_run=first_run)
 
     def _center_on_parent(self, win: tk.Toplevel) -> None:
         """把对话框摆到主窗口中间，并**钳在屏幕内**。
@@ -1483,6 +1329,658 @@ class Doc2MdApp:
             self.root.destroy()
         except Exception:
             pass
+
+
+# ======================= 设置界面 =======================
+
+def _cfg_dig(data: dict, dotted: str, default=None):
+    """按 "output.mode" 这种点分路径取值；中间层缺失就返回 default。"""
+    cur = data
+    for p in dotted.split("."):
+        if not isinstance(cur, dict) or p not in cur:
+            return default
+        cur = cur[p]
+    return cur
+
+
+def _cfg_put(data: dict, dotted: str, value) -> None:
+    """按点分路径写值，中间层不存在就补建 —— **不碰其它字段**。
+
+    这一点很关键：设置界面只该改自己管的那几项，不能因为"重新序列化一遍"
+    就把别人手写的字段（或我们不认识的键）丢掉。
+    """
+    parts = dotted.split(".")
+    cur = data
+    for p in parts[:-1]:
+        nxt = cur.get(p)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[p] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+# 引擎两档的人话说明。写在界面上而不是让用户去翻 config.json 的长注释。
+# 文案必须短：ttk.Radiobutton 不支持换行，太长会被窗口右边缘直接切掉。
+_ENGINE_CHOICES = (
+    ("rule", "rule —— 纯规则提取（默认，公文标题更准、更快）"),
+    ("layout", "layout —— ONNX 版面模型（复杂版面更稳、较慢）"),
+)
+
+# 配置里没有这个键时界面显示什么。用 Config 数据类的默认值，
+# 免得用户第一次打开设置界面看到一堆空框、以为配置坏了。
+_SET_DEFAULTS: dict = {
+    "pdf_engine": "rule",
+    "keep_original": True,
+    "overwrite_existing_md": "skip",
+    "pdf_trust_check": True,
+    "shield_sensitive_for_ocr": True,
+    "min_text_chars_per_page": 80,
+    "text_pdf_probe_pages": 5,
+    "max_excel_rows": 2000,
+    "max_excel_cols": 60,
+    "excel_sheet_limit": 20,
+    "local_concurrency": 4,
+    "com_concurrency": 2,
+    "watch_workers": 2,
+    "debounce_seconds": 3.0,
+    "ocr.enabled": True,
+    "local_ocr.enabled": False,
+    "local_ocr.python_exe": "",
+    "output.mode": "alongside",
+    "output.root": "",
+    "output.layout": "mirror",
+    "output.on_collision": "stable",
+    "state_db": str(TOOL_DIR / "state.db"),
+    "log_dir": str(TOOL_DIR / "logs"),
+}
+
+
+class SettingsDialog:
+    """统一的「设置」窗口：常规配置写 config.json，云端 OCR 凭据写 .env。
+
+    **为什么重做而不是接着用原来那个「填写 Token」小窗口**：
+    那个窗口把内容和按钮塞进同一个 grid，还 `resizable(False, False)`。
+    一勾「显示高级选项」，内容高度就超过屏幕高度，按钮被顶到屏幕外面 ——
+    既看不到也点不到，而且没有任何滚动条（用户实测反馈的问题）。
+    这里改成两条硬约束：
+      · 内容区一律套 Canvas + 纵向滚动条，内容再长都能滚；
+      · **按钮条放在滚动区之外**（贴着窗口底部），内容多长都不影响「保存」可见。
+    窗口可缩放，初始高度由 _center_on_parent 钳在屏幕内。
+
+    三条与主界面共享状态的约定：
+      · 写 config.json 前先读回原始 json 再逐项改（_cfg_put），保留其它键；
+      · 保存后调 app._reload_config() + app._sync_form_from_config()，
+        让左侧面板立刻反映这里改过的 roots / 输出目录；
+      · 凭据只写「用户真改过」的键 —— 与系统环境变量同值的不写回文件，
+        否则会把系统环境变量里的 Token 顺手抄进本机文件。
+    """
+
+    def __init__(self, app: "Doc2MdApp", *, tab: str | None = None,
+                 first_run: bool = False):
+        self.app = app
+        self.first_run = first_run
+        self.win = tk.Toplevel(app.root)
+        self.win.title("设置")
+        self.win.transient(app.root)
+        self.win.resizable(True, True)
+        self.win.minsize(560, 420)
+
+        self.vars: dict = {}          # 单值控件的变量（键 = 点分配置路径）
+        self.texts: dict = {}         # 列表控件的 Text（键 = 点分配置路径）
+        self.specs: list = []         # [(点分路径, 类型)]，回填与写回都按它走
+        self._cred_rows: list = []    # [(环境变量名, StringVar)]
+        self._roots: list = []
+        self.env_path = env_file_path(app.config_path)
+        self._came_from = set((app.cfg.env_keys if app.cfg is not None else []) or [])
+        try:
+            self._bg = ttk.Style().lookup("TFrame", "background") or "#f0f0f0"
+        except Exception:
+            self._bg = "#f0f0f0"
+
+        self._build()
+        self._load()
+        if tab:
+            self._select_tab(tab)
+        app._center_on_parent(self.win)
+        self.win.bind("<Escape>", lambda e: self._cancel())
+        self.win.bind("<Control-s>", lambda e: self._save())
+        self.win.protocol("WM_DELETE_WINDOW", self._cancel)
+        try:
+            # 窗口还没真正映射时 grab_set 会抛 "grab failed: window not viewable"。
+            # 那只是少了个模态效果，不该让整个设置界面打不开。
+            self.win.grab_set()
+        except Exception:
+            pass
+        app.root.wait_window(self.win)
+
+    # ---- 骨架 ----
+    def _build(self) -> None:
+        win = self.win
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+
+        self.nb = ttk.Notebook(win)
+        self.nb.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 0))
+
+        self._tab_convert()
+        self._tab_dirs()
+        self._tab_lists()
+        self._tab_tokens()
+
+        bar = ttk.Frame(win, padding=(10, 8, 10, 10))
+        bar.grid(row=1, column=0, sticky="ew")
+        ttk.Button(bar, text="保存", style="Go.TButton",
+                   command=self._save).pack(side="left")
+        ttk.Button(bar, text="保存并检测连通性",
+                   command=lambda: self._save(then_ping=True)).pack(side="left", padx=6)
+        # 首次启动是被程序拉起来的，说"放弃改动"有点怪 —— 这时它其实是「稍后再说」，
+        # 点了要落下记号，否则每次开程序都弹一遍（老窗口就是这个行为，别弄丢了）。
+        ttk.Button(bar, text="稍后再说" if self.first_run else "放弃改动",
+                   command=self._cancel).pack(side="left", padx=6)
+        ttk.Button(bar, text="打开 config.json",
+                   command=self.app._open_config).pack(side="right")
+        ttk.Button(bar, text="打开凭据文件",
+                   command=self.app._open_env).pack(side="right", padx=6)
+
+    def _page(self, title: str) -> ttk.Frame:
+        """加一个可滚动的页签，返回内容 Frame（往它里面 grid 控件）。"""
+        holder = ttk.Frame(self.nb)
+        self.nb.add(holder, text=f" {title} ")
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+
+        # 固定初始尺寸：Canvas 不给尺寸时会按自身默认值请求，几页签叠起来
+        # 窗口会忽大忽小。给死之后窗口初始大小稳定，用户仍可自由缩放。
+        canvas = tk.Canvas(holder, width=520, height=380, highlightthickness=0,
+                           bd=0, background=self._bg)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=vsb.set)
+
+        inner = ttk.Frame(canvas, padding=12)
+        inner.columnconfigure(0, weight=1)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win_id, width=e.width))
+
+        def wheel(e):
+            box = canvas.bbox("all")
+            if box and box[3] > canvas.winfo_height():     # 没超高就不滚
+                canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+
+        # 只在指针落在本页时接管滚轮：否则多页签之间会互相抢滚动
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        return inner
+
+    def _group(self, parent, r: int, title: str):
+        g = ttk.LabelFrame(parent, text=f" {title} ", padding=10)
+        g.grid(row=r, column=0, sticky="ew", pady=(0, 10))
+        g.columnconfigure(1, weight=1)
+        return g, r + 1
+
+    def _note(self, parent, r: int, text: str, *, wrap: int = 470) -> int:
+        ttk.Label(parent, text=text, style="Hint.TLabel", wraplength=wrap,
+                  justify="left").grid(row=r, column=0, columnspan=2,
+                                        sticky="w", pady=(0, 6))
+        return r + 1
+
+    def _field(self, parent, r: int, key: str, kind: str, label: str,
+               hint: str = "", choices=(), width: int = 12) -> int:
+        """按类型建一个字段，并把 (key, kind) 记进 self.specs 供回填/写回。
+
+        走一张表而不是每个字段手写四遍（建控件/回填/写回/提示），
+        否则以后加一个配置项就要改四处，必漏。
+
+        版式上有一条必须守住：**choice 占满整行**。单选钮的说明文字普遍偏长，
+        挤在"标签列右边的半行"里会被窗口右边缘直接切掉，而 ttk.Radiobutton
+        **不支持自动换行** —— 所以整行铺开 + 文案写短，两条一起做才不被切。
+        """
+        if kind == "bool":
+            var = tk.BooleanVar()
+            self.vars[key] = var
+            ttk.Checkbutton(parent, text=label, variable=var).grid(
+                row=r, column=0, columnspan=2, sticky="w")
+            next_r = r + 1
+        elif kind == "choice":
+            ttk.Label(parent, text=label).grid(row=r, column=0, columnspan=2,
+                                               sticky="w")
+            var = tk.StringVar()
+            self.vars[key] = var
+            for i, (val, text) in enumerate(choices):
+                ttk.Radiobutton(parent, text=text, value=val, variable=var).grid(
+                    row=r + 1 + i, column=0, columnspan=2, sticky="w")
+            next_r = r + 1 + len(choices)
+        else:
+            ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w",
+                                               padx=(0, 10))
+            var = tk.StringVar()
+            self.vars[key] = var
+            if kind in ("int", "float"):
+                ttk.Entry(parent, textvariable=var, width=width).grid(
+                    row=r, column=1, sticky="w")
+            else:                                       # str / dir
+                box = ttk.Frame(parent)
+                box.grid(row=r, column=1, sticky="ew")
+                box.columnconfigure(0, weight=1)
+                ttk.Entry(box, textvariable=var).grid(row=0, column=0, sticky="ew")
+                if kind == "dir":
+                    ttk.Button(box, text="浏览…", width=8,
+                               command=lambda v=var: self._pick_dir(v)).grid(
+                        row=0, column=1, padx=(6, 0))
+            next_r = r + 1
+        self.specs.append((key, kind))
+        if hint:
+            ttk.Label(parent, text=hint, style="Hint.TLabel", wraplength=470,
+                      justify="left").grid(
+                row=next_r, column=0, columnspan=2, sticky="w", pady=(0, 6))
+            next_r += 1
+        return next_r
+
+    def _list_field(self, parent, r: int, key: str, label: str, hint: str,
+                    height: int = 6) -> int:
+        """一行一条的列表项（排除目录名 / 敏感词 / 扩展名）。"""
+        ttk.Label(parent, text=label).grid(row=r, column=0, columnspan=2, sticky="w")
+        txt = tk.Text(parent, height=height, wrap="none", undo=False)
+        txt.grid(row=r + 1, column=0, columnspan=2, sticky="ew")
+        self.texts[key] = txt
+        row = r + 2
+        if hint:
+            ttk.Label(parent, text=hint, style="Hint.TLabel", wraplength=470,
+                      justify="left").grid(row=row, column=0, columnspan=2,
+                                           sticky="w", pady=(0, 10))
+            row += 1
+        return row
+
+    # ---- 页签：转换与引擎 ----
+    def _tab_convert(self) -> None:
+        p = self._page("转换与引擎")
+        r = 0
+
+        g, r = self._group(p, r, "文本型 PDF 引擎")
+        r = self._field(g, r, "pdf_engine", "choice", "提取引擎：",
+                        choices=_ENGINE_CHOICES)
+        r = self._note(g, r,
+                       "rule 在中文公文/国标上标题识别更准、约快 15 倍；"
+                       "layout 在复杂版面（杂志/海报/无边框表格）上更稳。\n"
+                       "改这里只影响之后转的文件，已转出的 md 不会自动重做 —— "
+                       "想让已转的按新引擎重来，命令行跑：run --redo-engine pdf-text。\n"
+                       "两档产出的 md 结构不同，同一批语料不要混用。")
+
+        g, r = self._group(p, r, "转换行为")
+        r = self._field(g, r, "keep_original", "bool",
+                        "保留原文件（转换后不删除、不改动源文件）")
+        r = self._field(g, r, "overwrite_existing_md", "choice", "已存在同名 md：",
+                        choices=(("skip", "skip —— 跳过，保留已有的 md"),
+                                 ("overwrite", "overwrite —— 覆盖重写")),
+                        hint="输出文件已存在、但状态库里没有记录时怎么办。")
+        r = self._field(g, r, "pdf_trust_check", "bool",
+                        "文本层可信度检查（字数够但其实是扫描页 + OCR 层 / 乱码的，改走 OCR）")
+        r = self._field(g, r, "shield_sensitive_for_ocr", "bool",
+                        "敏感目录不上云（只拦云端 OCR 上传，本地转换照常）")
+        r = self._field(g, r, "min_text_chars_per_page", "int",
+                        "每页最少字数：低于此值视为没有文字层，转走 OCR")
+        r = self._field(g, r, "text_pdf_probe_pages", "int",
+                        "文本层探测页数（探测失败时的字数判据用它）")
+
+        g, r = self._group(p, r, "Excel / 表格")
+        r = self._field(g, r, "max_excel_rows", "int", "每个工作表最多读取行数")
+        r = self._field(g, r, "max_excel_cols", "int", "每个工作表最多读取列数")
+        r = self._field(g, r, "excel_sheet_limit", "int", "每个工作簿最多读取工作表数")
+
+        g, r = self._group(p, r, "并发与监控")
+        r = self._field(g, r, "local_concurrency", "int",
+                        "本地转换并发数（docx / 文字型 PDF 等）")
+        r = self._field(g, r, "com_concurrency", "int",
+                        "COM 并发数（.doc / .xls 等老格式，走本机 WPS/Office）")
+        r = self._field(g, r, "watch_workers", "int", "监控模式的转换并发数")
+        r = self._field(g, r, "debounce_seconds", "float",
+                        "监控防抖秒数：文件大小稳定多久后才开始转")
+
+        g, r = self._group(p, r, "OCR 开关")
+        r = self._field(g, r, "ocr.enabled", "bool",
+                        "启用云端 OCR（扫描件走 PaddleOCR / MinerU 等链路）")
+        r = self._field(g, r, "local_ocr.enabled", "bool", "启用本地 OCR")
+        r = self._field(g, r, "local_ocr.python_exe", "str", "本地 OCR 解释器：",
+                        hint="填独立解释器的 python.exe 绝对路径；留空即自动禁用本地 OCR"
+                             "（扫描件全部走云端链路）。")
+
+    # ---- 页签：目录与输出 ----
+    def _tab_dirs(self) -> None:
+        p = self._page("目录与输出")
+        r = 0
+
+        g, r = self._group(p, r, "处理目录")
+        g.columnconfigure(0, weight=1)
+        self.lb_roots = tk.Listbox(g, height=6, width=1, selectmode=tk.EXTENDED,
+                                   activestyle="none", exportselection=False)
+        self.lb_roots.grid(row=0, column=0, sticky="ew")
+        sb = ttk.Scrollbar(g, orient="vertical", command=self.lb_roots.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.lb_roots.configure(yscrollcommand=sb.set)
+        ops = ttk.Frame(g)
+        ops.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        for i in range(4):
+            ops.columnconfigure(i, weight=1)
+        for i, (text, cmd) in enumerate((("添加目录…", self._add_root),
+                                         ("移除选中", self._del_root),
+                                         ("上移", lambda: self._move_root(-1)),
+                                         ("下移", lambda: self._move_root(1)))):
+            ttk.Button(ops, text=text, command=cmd).grid(
+                row=0, column=i, sticky="ew", padx=(0 if i == 0 else 4, 0))
+        r = self._note(g, 2, "列表顺序就是扫描顺序。改成空列表等于什么都不转。")
+
+        g, r = self._group(p, r, "Markdown 输出")
+        r = self._field(g, r, "output.mode", "choice", "输出位置：",
+                        choices=(("alongside", "与原文件同目录、同名（默认）"),
+                                 ("custom", "统一存到指定目录")))
+        r = self._field(g, r, "output.root", "dir", "输出根目录：",
+                        hint="只在「统一存到指定目录」时生效；留空会自动退回同目录。")
+        r = self._field(g, r, "output.layout", "choice", "目录结构：",
+                        choices=(("mirror", "mirror —— 保留原目录结构（默认）"),
+                                 ("flat", "flat —— 全部平铺进一个目录")))
+        r = self._field(g, r, "output.on_collision", "choice", "同名冲突：",
+                        choices=(("stable", "stable —— 先到先得 + 归属粘住（推荐）"),
+                                 ("overwrite", "overwrite —— 直接覆盖同名文件"),
+                                 ("suffix", "suffix —— 旧行为，名字会漂移")),
+                        hint="两个不同源文件算出同一个 md 路径时怎么办。")
+
+        g, r = self._group(p, r, "状态与日志")
+        r = self._field(g, r, "state_db", "str", "状态库：",
+                        hint="断点续传的唯一依据。换掉它等于从头重转，别轻易改。")
+        r = self._field(g, r, "log_dir", "dir", "日志目录：")
+
+    # ---- 页签：词表与扩展名 ----
+    def _tab_lists(self) -> None:
+        p = self._page("词表与扩展名")
+        r = 0
+        r = self._list_field(p, r, "exclude_dir_names", "排除的目录名",
+                             "扫描时整个跳过这些目录（按名字匹配，任意层级）。一行一个。")
+        r = self._list_field(p, r, "sensitive_markers", "敏感词",
+                             "路径或文件名命中这些词时，禁止上传云端 OCR（本地转换照常）。"
+                             "一行一个。")
+        r = self._list_field(p, r, "watch_extensions", "监控的文件扩展名",
+                             "留空＝用内置默认集合（.doc .docx .wps .xls .xlsx .et .pdf）。"
+                             "一行一个，写 .docx 或 docx 都认。",
+                             height=5)
+        r = self._list_field(p, r, "image_extensions", "图片扩展名",
+                             "会被当成图片走 OCR 的扩展名。一行一个；"
+                             "留空＝不处理图片（本项目默认只转文档）。",
+                             height=5)
+
+    # ---- 页签：云端 OCR Token ----
+    def _tab_tokens(self) -> None:
+        p = self._page("云端 OCR Token")
+
+        ttk.Label(p, style="Hint.TLabel", wraplength=500, justify="left", text=(
+            "这些 Token 决定扫描件能不能走云端 OCR。填完保存立即生效，不用重启程序。\n"
+            "留空＝不启用对应后端，不影响其它后端。Token 只写进本机凭据文件，"
+            "不会进版本库，也不会出现在日志里。")).grid(
+            row=0, column=0, sticky="w", pady=(0, 10))
+
+        g, r = self._group(p, 1, "常用（填了就能用云端 OCR）")
+        for f in CRED_FIELDS:
+            if not f.advanced:
+                r = self._cred_row(g, r, f)
+
+        # 高级项**不再折叠**。以前是勾选框展开，而窗口不能滚 ——
+        # 一展开按钮就被顶出屏幕。现在整页可滚，直接全部显示，少一个坑。
+        g2, r2 = self._group(p, 2, "高级（一般不用改）")
+        for f in CRED_FIELDS:
+            if f.advanced:
+                r2 = self._cred_row(g2, r2, f)
+
+        info, r3 = self._group(p, 3, "当前状态")
+        self.lbl_cred_info = ttk.Label(info, text="—", style="Hint.TLabel",
+                                       wraplength=500, justify="left")
+        self.lbl_cred_info.grid(row=0, column=0, columnspan=2, sticky="w")
+
+        btns = ttk.Frame(p)
+        btns.grid(row=4, column=0, sticky="w")
+        ttk.Button(btns, text="打开凭据文件",
+                   command=self.app._open_env).pack(side="left")
+        ttk.Button(btns, text="保存并检测连通性",
+                   command=lambda: self._save(then_ping=True)).pack(side="left", padx=6)
+
+    def _cred_row(self, parent, r: int, f) -> int:
+        """一个凭据字段占两行：上行「名称 + 输入框 + 显示」，下行灰色说明。"""
+        secret = "TOKEN" in f.key or f.key.endswith("_KEY")
+        ttk.Label(parent, text=f.label).grid(row=r, column=0, sticky="w", padx=(0, 6))
+        var = tk.StringVar(value=(os.environ.get(f.key) or "").strip())
+        ent = ttk.Entry(parent, textvariable=var, width=42)
+        if secret:
+            ent.configure(show="*")
+        ent.grid(row=r, column=1, sticky="ew", padx=(0, 6))
+        if secret:
+            eye = tk.BooleanVar(value=False)
+            ttk.Checkbutton(parent, text="显示", variable=eye, command=lambda v=eye, e=ent:
+                            e.configure(show="" if v.get() else "*")).grid(
+                row=r, column=2, sticky="e")
+        note = f.hint
+        if f.where:
+            note += f"　申请：{f.where}"
+        if var.get() and f.key not in self._came_from:
+            note = ("当前值来自「系统环境变量」，它的优先级高于本文件，"
+                    "在这里改不会生效（要改请改环境变量，或先把它删掉）。　" + note)
+        ttk.Label(parent, text=" " + note, style="Hint.TLabel", wraplength=500,
+                  justify="left").grid(row=r + 1, column=0, columnspan=3,
+                                       sticky="w", pady=(0, 6))
+        self._cred_rows.append((f.key, var))
+        return r + 2
+
+    # ---- 回填 / 写回 ----
+    def _load(self) -> None:
+        raw = self.app._raw()
+        for key, kind in self.specs:
+            var = self.vars.get(key)
+            if var is None:
+                continue
+            val = _cfg_dig(raw, key, _SET_DEFAULTS.get(key))
+            if kind == "bool":
+                var.set(bool(_SET_DEFAULTS.get(key) if val is None else val))
+            else:
+                var.set("" if val is None else str(val))
+        for key, txt in self.texts.items():
+            vals = _cfg_dig(raw, key, []) or []
+            if not isinstance(vals, (list, tuple)):
+                vals = [vals]
+            txt.delete("1.0", "end")
+            txt.insert("1.0", "\n".join(str(v) for v in vals))
+        self._roots = [str(x) for x in (_cfg_dig(raw, "roots", []) or [])]
+        self._refresh_roots()
+        self._refresh_cred_info()
+
+    def _refresh_cred_info(self) -> None:
+        lines = [f"凭据文件：{self.env_path}", f"填写情况：{describe_tokens()}"]
+        aliases = filled_aliases()
+        if aliases:
+            lines.append("注意：检测到别名 " + "、".join(aliases) + " 也有值，"
+                         "两个都填时请以「各后端实际凭据」为准。")
+        if self.app.cfg is not None:
+            lines.append("各后端实际凭据：")
+            lines += [f"    {ln}" for ln in describe_credentials(self.app.cfg)]
+        else:
+            lines.append("（配置未加载成功，无法列出后端）")
+        self.lbl_cred_info.configure(text="\n".join(lines))
+
+    def _write_config(self) -> bool:
+        path = self.app.config_path
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"配置文件读取失败：\n{path}\n\n{e}",
+                                 parent=self.win)
+            return False
+        if not isinstance(data, dict):
+            data = {}
+
+        data["roots"] = list(self._roots)
+
+        bad: list = []
+        for key, kind in self.specs:
+            var = self.vars.get(key)
+            if var is None:
+                continue
+            if kind == "bool":
+                _cfg_put(data, key, bool(var.get()))
+            elif kind == "int":
+                try:
+                    _cfg_put(data, key, int(str(var.get()).strip()))
+                except Exception:
+                    bad.append(key)
+            elif kind == "float":
+                try:
+                    _cfg_put(data, key, float(str(var.get()).strip()))
+                except Exception:
+                    bad.append(key)
+            else:
+                _cfg_put(data, key, str(var.get()).strip())
+
+        for key, txt in self.texts.items():
+            items, seen = [], set()
+            for line in txt.get("1.0", "end").splitlines():
+                s = line.strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    items.append(s)
+            _cfg_put(data, key, items)
+
+        # 落盘前再归一化一次：万一有旧配置把 pdf_engine 写成不认识的值，
+        # 界面上又没动它，也顺手纠正回允许值，免得留下一个"看着有值、其实无效"的键。
+        _cfg_put(data, "pdf_engine", normalize_pdf_engine(data.get("pdf_engine")))
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, path)          # 原子替换：中途崩了不会留下半个配置文件
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"配置文件写入失败：\n{path}\n\n{e}",
+                                 parent=self.win)
+            return False
+        if bad:
+            messagebox.showwarning(
+                APP_TITLE, "这些项不是合法数字，已保留原值：\n    " + "、".join(bad),
+                parent=self.win)
+        return True
+
+    def _collect_creds(self) -> dict:
+        updates: dict = {}
+        for key, var in self._cred_rows:
+            new = var.get().strip()
+            old = (os.environ.get(key) or "").strip()
+            # 没改过、且值本来来自系统环境变量（不在文件里）→ 不动文件，
+            # 免得把系统环境变量里的 Token 顺手抄进本机文件
+            if new == old and (key not in self._came_from or new):
+                continue
+            updates[key] = new
+        return updates
+
+    def _save(self, *, then_ping: bool = False) -> None:
+        # 1) 凭据先写：save_env_values 会当场把改动灌进 os.environ，改完即生效
+        updates = self._collect_creds()
+        if updates:
+            try:
+                save_env_values(updates, self.env_path)
+            except Exception as e:
+                messagebox.showerror(APP_TITLE, f"写入凭据文件失败：\n{self.env_path}\n\n{e}",
+                                     parent=self.win)
+                return
+            changed = [k for k, v in updates.items() if (v or "").strip()]
+            cleared = [k for k, v in updates.items() if not (v or "").strip()]
+            msg = f"[凭据] 已写入 {self.env_path}"
+            if changed:
+                msg += "\n        写入：" + "、".join(
+                    f"{k}={mask_token(os.environ.get(k, ''))}" for k in changed)
+            if cleared:
+                msg += "\n        置空：" + "、".join(cleared)
+            msg += "\n        已即时生效（无需重启）；当前 " + describe_tokens()
+            self.app.log(msg)
+
+        # 2) 常规配置写 config.json，然后让主界面重新读一遍
+        if not self._write_config():
+            return
+        self.app._reload_config()
+        self.app._sync_form_from_config()
+        self.app.log("[配置] 已保存到 " + str(self.app.config_path))
+        self.win.destroy()
+        if then_ping:
+            self.app.on_ping()
+
+    # ---- 小工具 ----
+    def _select_tab(self, name: str) -> None:
+        try:
+            for i in range(self.nb.index("end")):
+                if name in str(self.nb.tab(i, "text")):
+                    self.nb.select(i)
+                    return
+        except Exception:
+            pass
+
+    def _pick_dir(self, var: tk.StringVar) -> None:
+        cur = var.get().strip()
+        d = filedialog.askdirectory(title="选择目录", mustexist=False,
+                                    initialdir=cur if os.path.isdir(cur) else None)
+        if d:
+            var.set(str(Path(d)))
+
+    def _cancel(self) -> None:
+        """关掉窗口、不保存。
+
+        首启提示（first_run）时额外落一个「以后再说」记号 —— 记号写成 `.env` 里的
+        一行注释（`config.dismiss_token_prompt`），不另造文件。
+        从菜单主动打开的情况**不记**：用户可能只是先看一眼，不该因此被"静音"。
+        """
+        if self.first_run:
+            try:
+                dismiss_token_prompt(self.env_path)
+            except Exception:
+                pass
+        self.win.destroy()
+
+    def _refresh_roots(self) -> None:
+        self.lb_roots.delete(0, "end")
+        for r in self._roots:
+            self.lb_roots.insert("end", r)
+
+    def _add_root(self) -> None:
+        d = filedialog.askdirectory(title="选择要扫描的目录", mustexist=True,
+                                    parent=self.win)
+        if not d:
+            return
+        d = str(Path(d))
+        if d in self._roots:
+            messagebox.showinfo(APP_TITLE, "该目录已在列表里。", parent=self.win)
+            return
+        self._roots.append(d)
+        self._refresh_roots()
+
+    def _del_root(self) -> None:
+        sel = list(self.lb_roots.curselection())
+        if not sel:
+            messagebox.showinfo(APP_TITLE, "请先在列表里选中要移除的目录。",
+                                parent=self.win)
+            return
+        for i in reversed(sel):
+            self._roots.pop(i)
+        self._refresh_roots()
+
+    def _move_root(self, delta: int) -> None:
+        sel = list(self.lb_roots.curselection())
+        if len(sel) != 1:
+            return
+        i, j = sel[0], sel[0] + delta
+        if not (0 <= j < len(self._roots)):
+            return
+        self._roots.insert(j, self._roots.pop(i))
+        self._refresh_roots()
+        self.lb_roots.selection_clear(0, "end")
+        self.lb_roots.selection_set(j)
 
 
 def main(config_path: str | Path | None = None) -> int:

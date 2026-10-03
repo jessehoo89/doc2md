@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 from . import filelist
+from . import __version__
 from .config import (
     ENV_FILE,
     Config,
@@ -566,7 +567,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="文档批量转 Markdown（docx/doc/xls/xlsx/pdf → md，支持 OCR 与实时监控）",
     )
     _add_common(p, suppress=False)
-    p.add_argument("--version", action="version", version="doc2md 1.0.0")
+    p.add_argument("--version", action="version", version=f"doc2md {__version__}")
 
     sub = p.add_subparsers(dest="cmd", metavar="命令")
 

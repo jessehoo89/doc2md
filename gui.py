@@ -68,9 +68,10 @@ from doc2md.config import (          # noqa: E402  （config/state 都是轻量�
 )
 from doc2md.state import StateStore   # noqa: E402
 from doc2md.stdio import make_stdio_safe   # noqa: E402
+from doc2md import __version__   # noqa: E402
 
 APP_TITLE = "文档批量转 Markdown"
-APP_VERSION = "1.0.0"
+APP_VERSION = __version__   # 版本号单一来源：doc2md/__init__.py
 LOG_MAX_LINES = 5000                  # 日志面板上限，超出丢弃最旧的（长批量不至于吃满内存）
 
 # 日志着色规则：按顺序匹配，先命中先用（"====" 一条必须排在最前面）

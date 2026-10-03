@@ -217,6 +217,19 @@ def payload_entries() -> list[tuple[Path, str]]:
     return entries
 
 
+def is_user_data(arc: str) -> bool:
+    """用户数据（凭据/配置/状态/日志）绝不进安装包。
+
+    载荷本来是白名单，但开发机上如果先跑过一次 ``dist/doc2md`` 里的程序，程序会在 exe
+    旁边自动生成 ``.env`` / ``config.json`` / ``state.db`` / ``logs/``，顺手就被打进去，
+    安装时覆盖用户已经配好的凭据（2026-10 实测踩到）。这里做一道兜底过滤。
+    """
+    name = arc.rsplit("/", 1)[-1]
+    if name in {".env", "config.json"} or name.startswith("state.db"):
+        return True
+    return arc.startswith("logs/") or "/logs/" in arc
+
+
 def build_payload() -> None:
     step(3, 5, "压缩内嵌载荷 doc2md-payload.zip")
     if not DIST_APP.is_dir():
@@ -224,6 +237,10 @@ def build_payload() -> None:
 
     BUILD.mkdir(parents=True, exist_ok=True)
     entries = payload_entries()
+    dropped = sorted({arc for _, arc in entries if is_user_data(arc)})
+    if dropped:
+        log(f"[载荷] 已剔除用户数据 {len(dropped)} 项（不进安装包）：{dropped[:8]}")
+        entries = [(s, a) for s, a in entries if not is_user_data(a)]
     total_raw = sum(s.stat().st_size for s, _ in entries)
 
     # 直接以 "w" 打开即截断覆盖，**不要**先 unlink：少一次批量删除，也避免撞上

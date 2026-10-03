@@ -325,8 +325,20 @@ def make_shortcut(lnk: Path, target: Path, workdir: Path, desc: str = "", icon: 
 # --------------------------------------------------------------------------- #
 #  安装核心
 # --------------------------------------------------------------------------- #
+def is_user_data(arc: str) -> bool:
+    """用户数据：凭据 / 配置 / 状态 / 日志。安装时**已存在就不覆盖**。"""
+    name = arc.rsplit("/", 1)[-1]
+    if name in {".env", "config.json"} or name.startswith("state.db"):
+        return True
+    return arc.startswith("logs/") or "/logs/" in arc
+
+
 def extract_payload(dest: Path, on_step=None) -> int:
-    """把内嵌载荷解到 dest。返回解出的文件数。"""
+    """把内嵌载荷解到 dest。返回解出的文件数。
+
+    用户数据（``.env`` / ``config.json`` / ``state.db`` / ``logs/``）如果已经存在就**原样保留**，
+    绝不覆盖——升级安装不能把用户配好的 token 冲掉（GUI 里也能随时改）。
+    """
     zf_path = payload_path()
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -337,15 +349,24 @@ def extract_payload(dest: Path, on_step=None) -> int:
     say("正在读取安装包…")
     # 不做 testzip()：那会把 150MB 全解一遍校验 CRC，等于多花一倍时间。
     # ZipFile 构造时已校验中央目录，逐条解压时也会逐条校验 CRC，够用了。
+    kept = 0
+    skipped: list[str] = []
     with zipfile.ZipFile(zf_path) as zf:
         members = [m for m in zf.infolist() if not m.is_dir()]
         total = len(members)
         say(f"正在释放 {total} 个文件…")
         for i, m in enumerate(members, 1):
-            zf.extract(m, dest)
+            if is_user_data(m.filename):
+                skipped.append(m.filename)          # 用户数据一律不进安装目录（模板由 bootstrap 生成）
+            else:
+                zf.extract(m, dest)
+                kept += 1
             if i % 50 == 0 or i == total:
                 say(f"正在释放文件… {i}/{total}")
-    return total
+    if skipped and on_step:
+        names = "、".join(sorted({s.rsplit("/", 1)[-1] for s in skipped})[:4])
+        on_step(f"已保留你原有的 {names}（安装包不覆盖用户数据）")
+    return kept
 
 
 def bootstrap_user_files(dest: Path, on_step=None) -> list[str]:

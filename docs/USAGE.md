@@ -38,15 +38,58 @@ copy .env.example .env
 查找顺序：`%DOC2MD_PYTHON%` → `.venv\Scripts\python.exe` → `venv\Scripts\python.exe`
 → PATH 上第一个真能跑的 `python`（微软商店那个占位程序会被识别并跳过）。
 
-### Linux / macOS：一键脚本或源码安装
+### Linux / macOS：一条命令 / 一键脚本 / 源码
 
-一键脚本（推荐）：
+一条命令（不用先下仓库，推荐）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh | bash
+# 用 wget 也行
+wget -qO- https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh | bash
+```
+
+给脚本传参数要加 `-s --`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
+  | bash -s -- --prefix /opt/doc2md
+```
+
+国内直连 GitHub 常常很慢甚至卡死（取脚本、下程序两段都会卡）。套个加速前缀，两段
+一起走这条通道（`gh-proxy.com` / `ghproxy.net` / `ghfast.top` 都可用，实测）：
+
+```bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
+  | bash -s -- --gh-proxy https://gh-proxy.com/
+```
+
+已经手动下好 Release 里的程序时，跳过下载直接装：
+
+```bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
+  | bash -s -- --bin ~/下载/doc2md-v1.0.0-linux-x86_64
+```
+
+管道模式下脚本自己把要用的东西取回来：先问 GitHub 要最新版本号（API → 302 跳转 →
+页面，三级兜底），下载 Release 里约 130MB 的单文件程序，对着 `SHA256SUMS-linux.txt`
+校验（对不上直接停下，不会装半截），再把 `README.md`、`docs/USAGE.md`、`.env.example`
+一并铺到程序旁边。下载不动、或你自己加了 `--source`，就换成 `git clone` 到
+`<前缀>/share/doc2md-src/` 走源码安装（需要 git 与 Python 3.11+）。
+
+现成程序是在较新的系统上打包的，本机 glibc 比它旧时会报 `GLIBC_2.xx not found` 跑不起来
+（Debian 12 即如此，CI 用的 Ubuntu 24.04 是 glibc 2.39）。脚本装完会跑一次
+`doc2md --version` 自检，跑不起来就**自动改用源码安装**重来（前提是本机有 git 与
+Python 3.11+），并把没用的二进制删掉；两者都不具备时会明确报错让你加 `--source`。
+
+一键脚本（仓库已经在手边时）：
 
 ```bash
 sudo apt install -y libreoffice-writer libreoffice-calc   # 老式 .doc/.xls 才需要
 
 bash install.sh                    # 装到 ~/.local，装完就有 doc2md 命令
 bash install.sh --prefix /opt/doc2md
+bash install.sh --version v1.0.0   # 从 Release 拉指定版本（默认最新版）
+bash install.sh --gh-proxy URL     # GitHub 慢时套加速前缀，如 https://gh-proxy.com/
 bash install.sh --source           # 强制源码方式（建 venv + 装依赖）
 bash install.sh --venv 目录        # 源码方式的虚拟环境放哪 / 复用哪个
 bash install.sh --bin 文件         # 指定现成的单文件可执行程序
@@ -54,9 +97,19 @@ bash install.sh --mirror URL       # 直连 PyPI 失败时用的镜像（默认�
 bash install.sh --uninstall        # 卸载（会先列出将删除的内容并确认）
 ```
 
+两种形态都支持 `curl … | bash -s -- 参数` 这种喂法；参数完全一样。仓库里没有现成
+程序时（比如从源码压缩包解出来的仓库），加 `--version` 让脚本去 GitHub 拉，或
+`--source` 就地建 venv。
+
+环境变量：`DOC2MD_PREFIX`（装到哪）、`DOC2MD_VERSION`、`DOC2MD_GH_PROXY`、
+`DOC2MD_REPO`（换镜像或自己的 fork）、`DOC2MD_SRC_DIR`（源码克隆到哪）。
+
 - **两种装法自动挑**：脚本先找单文件可执行程序（`--bin` 指定 → `$DOC2MD_BIN` →
   仓库里 `dist-onefile/doc2md` → 脚本旁边叫 `doc2md` 的可执行文件）；找不到才退回
   源码方式建 venv、装 `requirements.txt`。前者不需要 Python，后者需要 3.11+。
+- **管道模式（`curl … | bash`）手上没有仓库文件**：脚本改用 GitHub 取所需的程序与
+  文档，`--bin` / `--source` / `--version` / `--gh-proxy` 都能和它一起用。注意
+  `--uninstall` 在管道模式下要从终端读确认，没有可读终端时请加 `-y`。
 - 程序会把 `config.json` / `.env` / `state.db` 写在**安装目录的 `share/doc2md/`**
   （源码方式则是仓库根），跟着程序走；`install.sh` 顺手把 `.env.example` 铺成
   `.env`（权限 0600，值留空）。

@@ -51,8 +51,8 @@ docx / xlsx / 有文字层的 PDF）；③ 跑一次 `doc2md scan` 试运行 —
 
 ### Windows
 
-方式一：**单文件安装程序**（目标机不用装 Python；仓库不提供 Release，装包在本机跑一次
-`打包安装包.bat` 生成，见 [使用说明](docs/USAGE.md#安装版单文件安装程序)）
+方式一：**单文件安装程序**（目标机不用装 Python；Release 里只有 Linux 包，Windows
+装包在本机跑一次 `打包安装包.bat` 生成，见 [使用说明](docs/USAGE.md#安装版单文件安装程序)）
 
 ```bat
 doc2md-安装程序.exe                  :: 双击：图形界面，选目录、建快捷方式
@@ -77,7 +77,46 @@ copy config.example.json config.json
 
 ### Linux / macOS
 
-方式一：**一键安装脚本**（推荐）
+一条命令装完（推荐；自动取 Release 里的现成程序，不需要 Python）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh | bash
+```
+
+用 `wget` 也行；要传参数就在后面加 `-s --`：
+
+```bash
+wget -qO- https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
+  | bash -s -- --prefix /opt/doc2md
+```
+
+默认装到 `~/.local`，装完就有 `doc2md` 命令。程序约 130MB，下完会按 Release 的
+`SHA256SUMS-linux.txt` 校验，对不上会直接停下。可用的参数：`--version v1.0.0`
+（默认最新版）、`--gh-proxy https://gh-proxy.com/`（GitHub 慢时套加速）、
+`--bin 文件`（用你已下好的 Release 程序）、`--source`（改成 git clone 源码安装）、
+`--uninstall`。全部参数与环境变量见[使用说明](docs/USAGE.md#linux--macos一条命令--一键脚本--源码)。
+
+现成程序是在较新的系统上打包的，本机 glibc 比它旧时会报 `GLIBC_2.xx not found` 跑不起来
+（Debian 12 就是这种情况）。脚本遇到会**自动改用源码安装**重来一遍（需要 git 与
+Python 3.11+），也可以自己加 `--source`。
+
+国内直连 GitHub 常常很慢甚至卡死（脚本自己取程序那段也一样）。这时套个加速前缀，
+取脚本和后面下程序都走这条通道：
+
+```bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
+  | bash -s -- --gh-proxy https://gh-proxy.com/
+```
+
+已经手动下好 Release 里的程序时，可以跳过下载：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jessehoo89/doc2md/main/install.sh \
+  | bash -s -- --bin ~/下载/doc2md-v1.0.0-linux-x86_64
+```
+
+仓库已经克隆到本地时，也可以就地跑脚本：
 
 ```bash
 # 老式 .doc / .xls 才需要 LibreOffice（Debian / Ubuntu）
@@ -93,7 +132,7 @@ bash install.sh --uninstall     # 卸载
 源码方式。程序把自己的 `config.json` / `.env` / `state.db` 写在安装目录的
 `share/doc2md/` 里，跟着程序走，不依赖当前工作目录。
 
-方式二：**源码 + 虚拟环境**
+源码 + 虚拟环境：
 
 ```bash
 python3 -m venv .venv

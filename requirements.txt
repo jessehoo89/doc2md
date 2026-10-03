@@ -1,4 +1,4 @@
-# 文档批量转 Markdown（doc2md）—— 直接依赖
+﻿# 文档批量转 Markdown（doc2md）—— 直接依赖
 #
 # 版本为本机实测通过的组合（Python 3.13 / Windows 11）。
 # 安装：
@@ -12,6 +12,7 @@ mammoth==1.12.2          # .docx → HTML
 markdownify==1.2.3       # HTML → Markdown
 openpyxl==3.1.5          # .xlsx
 xlrd==2.0.2              # 老式 .xls
+pydantic==2.13.5         # vendor/ZhDocParser（rule 档 PDF 引擎）依赖，上游漏声明
 
 # ---- 云端 OCR / HTTP ----
 requests==2.34.2
@@ -21,3 +22,9 @@ watchdog==6.0.0
 
 # ---- 仅 Windows：.doc / .xls 走 Office COM 时需要 ----
 pywin32==312; sys_platform == "win32"
+
+# ---- 仅 Linux / macOS：.doc / .xls 走 LibreOffice 时需要 ----
+# 非 pip 依赖，装系统包即可：
+#     Debian/Ubuntu: sudo apt install libreoffice-writer libreoffice-calc
+#     macOS:         brew install --cask libreoffice
+# 缺少 soffice 时仅老式 .doc/.xls 会报错跳过，其余格式不受影响。

@@ -12,8 +12,8 @@
     1) 构建 dist/doc2md/            ← PyInstaller + doc2md.spec（两个 exe 共享 _internal）
     2) 构建卸载程序 exe             ← PyInstaller + installer/uninstaller.spec（独立单文件）
     3) 直接打 zip build/doc2md-payload.zip
-       （两个 exe + uninstall.exe + _internal + README + LICENSE + 示例配置 + uninstall.bat，
-        无中间暂存目录）
+       （两个 exe + uninstall.exe + _internal + README + docs/USAGE.md + LICENSE
+        + 示例配置 + uninstall.bat，无中间暂存目录）
     4) 构建单文件安装程序            ← PyInstaller + installer/installer.spec，载荷内嵌
     5) 产出 dist-installer/doc2md-安装程序.exe（并附一份裸载荷 zip）
 
@@ -61,6 +61,7 @@ UNINSTALLER_IN_PAYLOAD = "uninstall.exe"
 # 载荷里除 exe/_internal 之外，还要带上的仓库文件 → 目标名
 EXTRA_FILES = [
     ("README.md", "README.md"),
+    ("docs/USAGE.md", "docs/USAGE.md"),
     ("LICENSE", "LICENSE"),
     ("config.example.json", "config.example.json"),
     (".env.example", ".env.example"),

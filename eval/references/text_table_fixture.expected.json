@@ -1,0 +1,14 @@
+{
+  "title": "Exam Lesson Overview",
+  "doc_type": "education",
+  "page_count": 1,
+  "section_count": 1,
+  "table_count": 1,
+  "chunk_count": 2,
+  "first_table_detection": "text",
+  "first_table_rows": [
+    ["Topic", "Count"],
+    ["Grammar", "6"],
+    ["Reading", "4"]
+  ]
+}

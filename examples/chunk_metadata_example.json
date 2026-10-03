@@ -1,0 +1,17 @@
+{
+  "id": "chunk-1",
+  "text": "本示例用于验证 DOCX 到 Markdown 和 JSON 的基础导出链路。",
+  "page_number": 1,
+  "heading_path": [
+    "中文复杂文档解析示例"
+  ],
+  "chunk_type": "section",
+  "source_section_id": "sec-1",
+  "source_table_id": null,
+  "metadata": {
+    "source_file": "samples/example.docx",
+    "document_title": "中文复杂文档解析示例",
+    "doc_type": "general",
+    "section_heading": "中文复杂文档解析示例"
+  }
+}

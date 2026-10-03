@@ -8,12 +8,19 @@
 
   python -m doc2md scan            扫描并试运行（不写文件）
   python -m doc2md run             批量转换全部
+  python -m doc2md convert <文件…>  只转换指定的文件 / 清单（见下）
   python -m doc2md watch           实时监控模式
-  python -m doc2md test <文件>     转换单个文件
+  python -m doc2md test <文件>     转换单个文件（看分流详情用）
   python -m doc2md status          查看统计（含各后端今日用量）
   python -m doc2md retry           重试失败的文件
   python -m doc2md ping            自检各云端 OCR 后端的就绪与连通性
   python -m doc2md env             查看凭据文件（.env）与各后端 Token 的生效情况
+
+`convert` —— 只转"这批文件"，不扫整目录。三种给法（可混用）：
+  python -m doc2md convert a.docx b.pdf "D:\\语料\\某目录"
+  python -m doc2md convert --list files.txt          # 一行一个路径，# 为注释
+  dir /b /s *.pdf | python -m doc2md convert --list -
+加 --dry-run 先看分流预览（不写文件），加 --force 强制重转（否则已转过的会跳过）。
 """
 from __future__ import annotations
 
@@ -23,6 +30,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import filelist
 from .config import (
     ENV_FILE,
     Config,
@@ -63,14 +71,18 @@ def _install_thread_guard() -> None:
     threading.excepthook = hook
 
 
-def _banner(cfg: Config, mode: str) -> None:
+def _banner(cfg: Config, mode: str, roots_text: str | None = None) -> None:
     print("=" * 74)
     print(f"  文档批量转 Markdown  ·  {mode}")
     print("=" * 74)
-    print(f"  处理目录 : {', '.join(cfg.roots)}")
+    print(f"  处理目录 : {roots_text if roots_text is not None else ', '.join(cfg.roots)}")
     print(f"  转换格式 : {', '.join(cfg.watch_extensions)}")
     print(f"  保留原文件: {'是' if cfg.keep_original else '否'}")
     print(f"  md 输出到 : {describe_output(cfg)}")
+    if cfg.pdf_engine == "rule":
+        print("  文本 PDF : rule 档（纯规则、零模型，不加载 ONNX 版面模型）")
+    else:
+        print("  文本 PDF : layout 档（ONNX 版面模型，约 49MB）")
     chain = describe_backends(cfg)
     n_backends = len([b for b in cfg.ocr_backends if b.enabled])
     print(f"  云端 OCR : {'启用' if cfg.ocr.enabled else '禁用'}"
@@ -101,16 +113,9 @@ def cmd_scan(args, cfg: Config) -> int:
     return 0
 
 
-def cmd_run(args, cfg: Config) -> int:
-    if args.no_ocr:
-        cfg.ocr.enabled = False
-    _banner(cfg, "批量转换")
-    store = StateStore(cfg.state_db)
-    eng = Engine(cfg, store, verbose=not args.quiet)
-    t0 = time.time()
-    rep = eng.run(dry_run=False, limit=args.limit)
-    store.close()
-
+def _print_summary(rep, elapsed: float) -> None:
+    """打印转换汇总。`run` 与 `convert` 共用这一份 —— 统计项只写一遍，
+    免得以后加一项只顾得上改其中一处。"""
     print("\n" + "=" * 74)
     print("  转换完成")
     print("=" * 74)
@@ -131,7 +136,7 @@ def cmd_run(args, cfg: Config) -> int:
         print(f"  熔断切换：{rep.ocr_switched} 个文件由备用后端接手")
     if rep.ocr_missing_images:
         print(f"  [注意] {rep.ocr_missing_images} 个文件的插图未被后端返回（md 中留有空占位）")
-    print(f"  耗时 {time.time() - t0:.1f} 秒")
+    print(f"  耗时 {elapsed:.1f} 秒")
     if rep.ocr_paused:
         print("\n  [注意] 云端 OCR 链路全部不可用，本轮已熔断剩余 OCR 任务。")
         print("         本地转换（Office / 文本 PDF）不受影响，已全部完成。")
@@ -144,6 +149,175 @@ def cmd_run(args, cfg: Config) -> int:
             print(f"    - {Path(p).name}\n        {e}")
         print("\n  可用 python -m doc2md retry 重试这些文件。")
     print("=" * 74)
+
+
+def cmd_run(args, cfg: Config) -> int:
+    if args.no_ocr:
+        cfg.ocr.enabled = False
+    _banner(cfg, "批量转换")
+    store = StateStore(cfg.state_db)
+    redo = (getattr(args, "redo_engine", "") or "").strip()
+    if redo:
+        # 换了引擎（或改了转换逻辑）后，状态库里"已成功"的记录会让文件被跳过。
+        # 只删记录、不删 md —— 重转会覆盖它们。
+        n = store.reset_by_engine(redo)
+        print(f"  [重转] 已清除 engine={redo} 的 {n} 条记录（md 不动，重转时覆盖）")
+        if n == 0:
+            print(f"         当前库里有这些引擎：{store.engines()}")
+        print()
+    eng = Engine(cfg, store, verbose=not args.quiet)
+    t0 = time.time()
+    rep = eng.run(dry_run=False, limit=args.limit)
+    store.close()
+    _print_summary(rep, time.time() - t0)
+    return 0 if rep.failed == 0 else 1
+
+
+def _merge_lists(dst, src) -> None:
+    """把两份清单合并进 dst（路径按小写去重，与状态库口径一致）。"""
+    seen = {str(p).lower() for p in dst.paths}
+    for p in src.paths:
+        key = str(p).lower()
+        if key in seen:
+            dst.duplicates += 1
+        else:
+            seen.add(key)
+            dst.paths.append(p)
+    dst.missing += src.missing
+    dst.unsupported += src.unsupported
+    dst.from_dirs += src.from_dirs
+    dst.duplicates += src.duplicates
+
+
+def _outside_roots(paths, roots) -> list[Path]:
+    """挑出不在任何处理目录之下的文件。
+
+    与输出结构有关：custom + mirror 模式下，只有位于某个 root 之下的文件才能算出
+    相对路径，其余会退化成"按文件名平铺到输出根"。清单模式很容易撞上这件事
+    （文件本来就是从别处拷来的），所以提前提示，而不是等用户发现 md 全堆在一起。
+    """
+    out: list[Path] = []
+    resolved = []
+    for r in roots or []:
+        try:
+            resolved.append(Path(r).resolve())
+        except OSError:
+            continue
+    for p in paths:
+        try:
+            ap = p.resolve()
+        except OSError:
+            ap = p
+        hit = False
+        for r in resolved:
+            try:
+                ap.relative_to(r)
+                hit = True
+                break
+            except ValueError:
+                continue
+        if not hit:
+            out.append(p)
+    return out
+
+
+def cmd_convert(args, cfg: Config) -> int:
+    """按清单批量转换：只处理点名的文件，不去扫 `cfg.roots`。
+
+    存在的理由：日常大量场景是"就转这一批"，而整目录跑要么把所有无关文件也带上，
+    要么得反复改 config 的 roots。这里把清单当作"临时的一组根目录"，转换本身
+    仍走 Engine 的既有流程 —— 幂等跳过、敏感拦截、故障熔断、断点续传一律照旧。
+    """
+    if args.no_ocr:
+        cfg.ocr.enabled = False
+
+    parts = []
+    if args.list:
+        try:
+            lines, enc = filelist.read_manifest(args.list)
+        except FileNotFoundError as e:
+            print(f"[错误] {e}")
+            return 2
+        except OSError as e:
+            print(f"[错误] 读取清单失败：{e}")
+            return 2
+        if args.list == "-":
+            base, src_name = Path.cwd(), "标准输入"
+        else:
+            mp = Path(args.list).expanduser().resolve()
+            base, src_name = mp.parent, str(mp)
+        one = filelist.collect(lines, cfg=cfg, base_dir=base,
+                               source=f"{src_name}（编码 {enc}）")
+        one.encoding = enc
+        parts.append(one)
+
+    if args.paths:
+        parts.append(filelist.collect(args.paths, cfg=cfg, source="命令行参数"))
+
+    if not parts:
+        print("[错误] 没有指定要转换的文件。三种用法：")
+        print("        doc2md convert a.pdf b.docx            直接列文件")
+        print("        doc2md convert --list files.txt        从清单文件读")
+        print("        dir /b /s *.pdf | doc2md convert --list -   从管道读")
+        return 2
+
+    res = parts[0]
+    for more in parts[1:]:
+        _merge_lists(res, more)
+
+    _banner(cfg, "清单批量转换", roots_text="（忽略 —— 只转清单里点名的文件）")
+    print(f"  清单来源 : {res.source}")
+    print(f"  解析结果 : {res.summary()}")
+    if res.missing:
+        print(f"\n  [找不到] {len(res.missing)} 条（清单里写了，磁盘上没有）：")
+        for m in res.missing[:10]:
+            print(f"    - {m}")
+        if len(res.missing) > 10:
+            print(f"    …另有 {len(res.missing) - 10} 条")
+    if res.unsupported:
+        print(f"\n  [格式不支持] {len(res.unsupported)} 个"
+              f"（不在 config 的 watch_extensions 里，会被跳过）：")
+        for u in res.unsupported[:10]:
+            print(f"    - {u}")
+        if len(res.unsupported) > 10:
+            print(f"    …另有 {len(res.unsupported) - 10} 个")
+    if not res.ok:
+        print("\n[错误] 清单里没有任何可转换的文件，已中止。")
+        print("       检查上面的「找不到 / 格式不支持」，或看看是不是漏了 --list 的参数。")
+        return 2
+
+    if cfg.output.is_custom and cfg.output.layout == "mirror":
+        outside = _outside_roots(res.paths, cfg.roots)
+        if outside:
+            print(f"\n  [提示] {len(outside)} 个文件不在处理目录之下，"
+                  f"mirror 模式下会平铺到输出根目录。")
+            print("         想保留原本的目录结构，用 --root 指定它们的上级目录。")
+
+    print()
+    store = StateStore(cfg.state_db)
+    try:
+        if args.force and not args.dry_run:
+            n = store.forget(res.paths)
+            print(f"  [重转] --force：已清除清单内文件的状态记录"
+                  f"（实际命中 {n} 条；已产出的 md 不动，重转时覆盖）\n")
+        elif args.force:
+            # dry-run 是无副作用的预览，别在这里把状态库清了 —— 否则"先看看再决定"
+            # 的人会发现记录已经没了，真跑时反而变成全量重转。
+            print("  [提示] --dry-run 与 --force 同用：只预览，不清状态记录、不写文件。\n")
+        eng = Engine(cfg, store, verbose=not args.quiet)
+        t0 = time.time()
+        try:
+            rep = eng.run(dry_run=args.dry_run, limit=args.limit, paths=res.paths,
+                          force=args.force)
+        finally:
+            eng.close()
+    finally:
+        store.close()
+
+    if args.dry_run:
+        print("\n[提示] --dry-run 只做分流预览，未写入任何文件。去掉该参数即可真正转换。")
+        return 0
+    _print_summary(rep, time.time() - t0)
     return 0 if rep.failed == 0 else 1
 
 
@@ -364,7 +538,7 @@ def cmd_env(args, cfg: Config) -> int:
     print("        但**只有 precision 模式会返回插图**，要插图就必须填 Token。")
     print("        sf-deepseek-ocr（硅基流动）只出文字不返回插图，排在需要插图的后端之后。")
     print("        填好后用 `python -m doc2md ping` 或图形界面的「检测云端 OCR」验证连通性。")
-    print("        图形界面里可以直接填：「填写云端 OCR Token…」按钮，保存即生效。")
+    print("        图形界面里可以直接填：工具栏「设置…」里的「云端 OCR Token」页，保存即生效。")
     print("=" * 74)
     return 0
 
@@ -403,7 +577,20 @@ def build_parser() -> argparse.ArgumentParser:
         return sp
 
     add("scan", "扫描并试运行，不写文件")
-    add("run", "批量转换全部文件")
+    r = add("run", "批量转换全部文件（扫 cfg.roots；只转指定文件请用 convert）")
+    r.add_argument("--redo-engine", metavar="引擎", default=argparse.SUPPRESS,
+                   help="先清掉状态库里该引擎的记录再跑（换引擎后重转用），"
+                        "如 pdf-text / docx / xlsx")
+    c = add("convert", "只转换指定的文件（命令行给路径，或用 --list/-l 给清单文件）")
+    c.add_argument("paths", nargs="*", metavar="路径",
+                   help="要转换的文件或目录，可给多个；目录会按配置的扩展名递归展开")
+    c.add_argument("--list", "-l", dest="list", metavar="清单",
+                   help="清单文件路径，每行一个（# 开头为注释、空行忽略、"
+                        "支持 UTF-8/GBK/UTF-16 编码）；给 - 表示从标准输入读")
+    c.add_argument("--dry-run", action="store_true",
+                   help="只解析清单并预览分流与 OCR 量，不写任何文件")
+    c.add_argument("--force", action="store_true",
+                   help="忽略状态库强制重转清单内的文件（已产出的 md 会被覆盖）")
     w = add("watch", "实时监控目录并自动转换")
     w.add_argument("--no-catch-up", action="store_true", help="启动时不先做全量扫描")
     t = add("test", "转换单个文件")
@@ -432,6 +619,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "scan": cmd_scan,
         "run": cmd_run,
+        "convert": cmd_convert,
         "watch": cmd_watch,
         "test": cmd_test,
         "status": cmd_status,

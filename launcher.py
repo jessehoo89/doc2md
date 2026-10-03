@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ MENU = """
     [G]  打开图形界面 ★         窗口版操作界面（按钮点选，功能与本菜单完全一样）
     [1]  扫描 / 试运行          看看有多少文件、走哪条通道（不写任何文件）
     [2]  开始批量转换            全量转换，中断后重跑会自动续传
+    [L]  按清单批量转换          只转清单里点名的文件（不做全量扫描）
     [3]  启动实时监控            常驻监控新增和修改的文件，自动转换
     [4]  查看转换统计            已转多少、失败多少、今日 OCR 用了多少页
     [5]  重试失败的文件          只重跑上次失败的
@@ -120,6 +122,52 @@ def _run(args: list[str], *, pause: bool = True) -> None:
         input("\n按回车返回菜单…")
 
 
+def _run_by_list() -> None:
+    """按清单批量转换：给一个纯文本清单（每行一个路径），只转里面点名的文件。
+
+    菜单项 [2] 是整目录全量跑；实际工作中经常是"就转这一批"（补转某几百份、
+    或者别处拷来的一批），为此每次去改 config.json 的 roots 太别扭。
+
+    先跑一次 --dry-run 让用户过目，再问一句才真转 —— 清单写错了不会报错、
+    只会少转文件，所以"先看清楚再动手"这件事值得多一次确认。
+    """
+    print("\n清单格式：纯文本，每行一个文件路径（# 开头是注释，空行忽略）。")
+    print("做法一：资源管理器里选中文件 → 右键「复制为路径」→ 粘进记事本，一行一个。")
+    print("做法二：在目标目录里执行  dir /b /s *.pdf > 清单.txt")
+    print("（路径可以相对清单文件所在目录写，也可以写绝对路径；目录行会递归展开）\n")
+    raw = input("把清单文件拖进本窗口，或粘贴它的完整路径，然后回车：").strip()
+
+    # 拖拽进来的路径带引号；一次拖多个会得到多个引号对，这里只取第一个
+    quoted = re.findall(r'"([^"]+)"', raw)
+    if len(quoted) > 1:
+        print(f"\n[提示] 一次只能给一个清单文件，已取第一个：{quoted[0]}")
+        raw = quoted[0]
+    elif len(quoted) == 1:
+        raw = quoted[0]
+    raw = raw.strip()
+
+    if not raw:
+        return
+    p = Path(raw)
+    if not p.is_file():
+        print(f"\n[错误] 找不到清单文件：{p}")
+        input("按回车返回菜单…")
+        return
+
+    print("\n先预览（不写任何文件）…")
+    _run(["convert", "--list", str(p), "--dry-run"], pause=False)
+    try:
+        ans = input("\n确认按这份清单开始转换？(y/N) ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if ans in ("y", "yes"):
+        _run(["convert", "--list", str(p)])
+    else:
+        print("已取消，未做任何改动。")
+        input("按回车返回菜单…")
+
+
 def _open_path(p: Path, *, editor_fallback: bool = False) -> None:
     try:
         os.startfile(str(p))  # type: ignore[attr-defined]
@@ -181,6 +229,8 @@ def main() -> int:
             _run(["scan"])
         elif choice == "2":
             _run(["run"])
+        elif choice in ("l", "L"):
+            _run_by_list()
         elif choice == "3":
             print("\n监控模式会一直运行，关闭本窗口即停止。")
             _run(["watch"])
@@ -202,7 +252,7 @@ def main() -> int:
             print("\n再见。")
             return 0
         else:
-            print("\n[提示] 请输入 0-9 之间的序号，或 G 打开图形界面。")
+            print("\n[提示] 请输入 0-9 之间的序号，或 G 打开图形界面、L 按清单转换。")
             input("按回车继续…")
     return 0
 

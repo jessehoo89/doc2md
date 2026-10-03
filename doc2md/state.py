@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -277,6 +278,40 @@ class StateStore:
         with self._lock:
             self._conn.execute("DELETE FROM files")
             self._conn.commit()
+
+    def reset_by_engine(self, engine: str) -> int:
+        """删掉状态库里某个引擎的全部记录，让这些文件下次重新转换。
+
+        用途：换了 PDF 引擎（`layout` ↔ `rule`）、或改了转换逻辑后想重转**某一类**
+        文件。**只删记录，不动已产出的 md** —— 重转时会覆盖它们。
+        常见取值：`pdf-text` / `docx` / `xlsx` / `com-docx` / `com-xlsx`。
+        """
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM files WHERE engine = ?", (engine,))
+            self._conn.commit()
+        return cur.rowcount
+
+    def forget(self, paths: Iterable[str | Path]) -> int:
+        """删掉指定文件的状态记录，让它们下次重新转换（`convert --force` 用）。
+
+        与 `reset_by_engine` 同一条约定：**只删记录，不动已产出的 md** ——
+        重转时会覆盖它们。返回真正删掉的条数（本来就没记录的不计）。
+        """
+        items = [(str(p),) for p in paths]
+        if not items:
+            return 0
+        with self._lock:
+            cur = self._conn.executemany("DELETE FROM files WHERE path = ?", items)
+            self._conn.commit()
+        return cur.rowcount
+
+    def engines(self) -> dict[str, int]:
+        """各 engine 的记录数（用来查该填什么名字给 reset_by_engine）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT engine, COUNT(*) c FROM files GROUP BY engine ORDER BY c DESC"
+            ).fetchall()
+        return {(r["engine"] or "-"): r["c"] for r in rows}
 
     def close(self) -> None:
         with self._lock:

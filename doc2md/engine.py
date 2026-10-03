@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -161,7 +162,14 @@ class Engine:
         self._down_lock = threading.Lock()
         # 已经提示过"不返回插图"的后端名，避免同一句提示刷满日志
         self._no_image_notified: set[str] = set()
+        # 「本轮文本型 PDF 用哪个引擎」只播报一次 —— 这个值决定整批产出结构，
+        # 却藏在 config.json 里、界面上也只是一个下拉框，静默跑错引擎没人会发现。
+        self._pdf_engine_notified = False
         self.report = Report()
+        # `--force` 时置 True：忽略"md 比源文件新就不覆盖"这道保护。
+        # 光靠调用方清状态库是不够的 —— 那条保护读的是磁盘 mtime，与状态库无关，
+        # 不清掉它 `--force` 就会变成"清完记录又被拦住"，用户看到的是"没重转"。
+        self.force_redo = False
 
     def log(self, msg: str) -> None:
         with self._log_lock:
@@ -180,21 +188,12 @@ class Engine:
             if not rp.exists():
                 self.log(f"[警告] 根目录不存在，已跳过：{root}")
                 continue
-            for dirpath, dirnames, filenames in _walk(rp):
-                if is_excluded(self.cfg, dirpath):
-                    dirnames[:] = []
+            for p in iter_docs(rp, self.cfg):
+                key = str(p).lower()
+                if key in seen:
                     continue
-                for name in filenames:
-                    p = Path(dirpath) / name
-                    if p.suffix.lower() not in self.cfg.watch_ext_set:
-                        continue
-                    if p.suffix.lower() in {".md"} or p.name.startswith("~$"):
-                        continue
-                    key = str(p).lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    yield p
+                seen.add(key)
+                yield p
 
     def plan(self, path: Path) -> Task | None:
         """判断单个文件该走哪条路。返回 None 表示跳过。"""
@@ -342,8 +341,9 @@ class Engine:
         if self.store.is_up_to_date(src, t.size, t.mtime) and md_path.exists():
             return "skip", "已转换"
 
-        # 手工改动过 md（比源文件新）时不覆盖
-        if md_path.exists() and self.cfg.overwrite_existing_md == "skip":
+        # 手工改动过 md（比源文件新）时不覆盖。force_redo 时跳过这道保护。
+        if (md_path.exists() and not self.force_redo
+                and self.cfg.overwrite_existing_md == "skip"):
             try:
                 if md_path.stat().st_mtime > t.mtime:
                     self.store.mark_ok(src, t.size, t.mtime, t.route, str(md_path), t.pages)
@@ -416,7 +416,20 @@ class Engine:
         elif t.route == "rtf":
             return self._run_com(t, md_path)
         elif t.route == "pdf_text":
-            md = converters.pdf_to_markdown(src, use_layout=self.cfg.pdf_use_layout)
+            # 只播报一次：这个值决定整批产出的 md 结构，却藏在 config.json 里。
+            # 静默跑错引擎（比如以为在用 rule、实际还是 layout）没人会发现。
+            if not self._pdf_engine_notified:
+                self._pdf_engine_notified = True
+                self.log(
+                    f"[配置] 文本型 PDF 引擎：{self.cfg.pdf_engine} "
+                    f"（rule = 纯规则提取，默认；layout = ONNX 版面模型）\n"
+                    f"        只影响之后转的文件；要让已转的按新引擎重来，跑 "
+                    f"run --redo-engine pdf-text"
+                )
+            md = converters.pdf_to_markdown(
+                src,
+                engine=self.cfg.pdf_engine,
+            )
             engine = "pdf-text"
         else:
             raise RuntimeError(f"未知本地路线 {t.route}")
@@ -692,10 +705,32 @@ class Engine:
 
     # ---------------- 批量执行 ----------------
     def run(self, dry_run: bool = False, limit: int = 0,
-            on_progress: Callable[[int, int], None] | None = None) -> Report:
-        self.log("[1/3] 扫描文件…")
+            on_progress: Callable[[int, int], None] | None = None,
+            paths: Iterable[Path] | None = None,
+            force: bool = False) -> Report:
+        """批量转换。
+
+        paths=None（默认）时扫描 `cfg.roots` 下的全部文件；给了 paths 就**只处理
+        这些文件**（`doc2md convert` 的清单模式）。两条路共用下面的分流、并发调度
+        与统计，所以清单模式同样受幂等跳过、敏感拦截、故障熔断影响 —— 把清单当作
+        "临时的一组根目录"看待即可，不做任何特殊对待。
+
+        注意 paths 里的文件**不要求位于 roots 之下**：输出路径由
+        `converters.md_path_for` 归一（不在任何 root 下时按文件名平铺到输出根），
+        因此转换清单里可以放任意位置的文件。
+
+        force=True 时额外忽略"md 比源文件新就不覆盖"这道保护（调用方通常还会先
+        清掉状态库记录，否则幂等跳过先一步生效，根本走不到这里）。
+        """
+        self.force_redo = force
+        if paths is None:
+            self.log("[1/3] 扫描文件…")
+            sources: Iterable[Path] = self.iter_files()
+        else:
+            self.log("[1/3] 按给定清单处理…")
+            sources = paths
         tasks: list[Task] = []
-        for p in self.iter_files():
+        for p in sources:
             t = self.plan(p)
             if t is None:
                 continue
@@ -833,6 +868,29 @@ def _walk(root: Path):
 
     for dirpath, dirnames, filenames in os.walk(str(root)):
         yield dirpath, dirnames, filenames
+
+
+def iter_docs(root: Path, cfg) -> Iterator[Path]:
+    """递归列出 root 下所有「该转换」的文件（按配置的扩展名与排除目录过滤）。
+
+    根目录扫描（`Engine.iter_files`）与清单里的目录行展开（`filelist`）共用这一份
+    规则 —— 两处各写一遍必然漂移，然后出现「整目录跑会转、清单里写同一个目录却
+    不转」这种最难查的差异。
+
+    不做去重：调用方各自决定去重口径（根目录扫描跨 root 去重、清单按整批去重）。
+    """
+    for dirpath, dirnames, filenames in _walk(Path(root)):
+        if is_excluded(cfg, dirpath):
+            dirnames[:] = []
+            continue
+        for name in filenames:
+            p = Path(dirpath) / name
+            suf = p.suffix.lower()
+            if suf not in cfg.watch_ext_set:
+                continue
+            if suf == ".md" or name.startswith("~$"):
+                continue
+            yield p
 
 
 def _drop_empty_dir(p: Path | None) -> None:

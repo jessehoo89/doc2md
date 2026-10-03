@@ -94,7 +94,11 @@ def _classify_zip(p: Path) -> Kind:
 def _classify_ole2(p: Path) -> Kind:
     """OLE2 容器里靠 Stream 名区分 Word / Excel / PowerPoint。
 
-    OLE2 的目录项用 UTF-16LE 存 Stream 名，直接在原始字节里搜关键词即可。
+    分两级判定：先按老办法扫前 16KB 原始字节（真实 Office 文件命中的就是
+    这条路，代价最小，行为与以往一致）；只有没认出 WordDocument 时，才用
+    CfbReader 精确解析 CFB 目录项——目录扇区位置不固定，LibreOffice 写出的
+    .doc 目录常落在 16KB 之后，且流数据里的巧合字节序列（如 "Book"）会把
+    它误判成 Excel。CfbReader 解析失败时回落到老办法与扩展名兜底。
     """
     try:
         with open(p, "rb") as f:
@@ -107,6 +111,22 @@ def _classify_ole2(p: Path) -> Kind:
 
     if has("WordDocument"):
         return Kind.DOC
+
+    names = None
+    try:
+        if p.stat().st_size <= 64 * 1024 * 1024:
+            with open(p, "rb") as f:
+                names = set(CfbReader(f.read()).names())
+    except Exception:  # noqa: BLE001
+        names = None
+    if names:
+        if "WordDocument" in names:
+            return Kind.DOC
+        if "Workbook" in names or "Book" in names:
+            return Kind.XLS
+        if "PowerPoint Document" in names:
+            return Kind.PPT
+
     if has("Workbook") or has("Book"):
         return Kind.XLS
     if has("PowerPoint Document"):

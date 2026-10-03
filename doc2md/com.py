@@ -165,10 +165,69 @@ class ComConverter:
                     pass
             self._recycle("excel")
 
+    # ---------- LibreOffice（非 Windows 兜底通道） ----------
+    def _soffice_convert(self, src: Path, dst: Path, fmt: str) -> Path:
+        """用 soffice headless 把老式格式转成 OOXML（写入 dst 并返回）。
+
+        非 Windows 系统没有 COM，用 LibreOffice 顶替同一职责：
+        先转成 .docx/.xlsx，再走 doc2md 既有的本地解析通道。
+        每个进程独立 UserInstallation profile，避免并发时抢单例锁。
+        """
+        import subprocess
+
+        soffice = shutil.which("soffice") or shutil.which("libreoffice")
+        if not soffice:
+            raise ComUnavailable(
+                "非 Windows 系统需要安装 LibreOffice（soffice）来转换老式 Office 格式"
+            )
+        outdir = dst.parent
+        outdir.mkdir(parents=True, exist_ok=True)
+        profile = outdir / "_lo_profile"
+        cmd = [
+            soffice, "--headless", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation={profile.as_uri()}",
+            "--convert-to", fmt, "--outdir", str(outdir), str(src),
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300, check=False
+            )
+        except subprocess.TimeoutExpired as e:
+            raise ComUnavailable(f"soffice 转换超时: {src.name}") from e
+        produced = outdir / f"{src.stem}.{fmt}"
+        if proc.returncode != 0 or not produced.exists():
+            detail = (proc.stderr or proc.stdout or "").strip()[:200]
+            raise ComUnavailable(
+                f"soffice 转换失败（{src.name}, {fmt}）: {detail or '未产出目标文件'}"
+            )
+        if produced != dst:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists():
+                dst.unlink()
+            shutil.move(str(produced), str(dst))
+        shutil.rmtree(profile, ignore_errors=True)
+        return dst
+
+    def _soffice_to_ooxml(self, src: Path, kind: str, tmpdir: Path) -> Path:
+        stem = src.stem[:80] or "file"
+        if kind in ("doc",):
+            return self._soffice_convert(src, tmpdir / f"{stem}.docx", "docx")
+        if kind in ("xls",):
+            return self._soffice_convert(src, tmpdir / f"{stem}.xlsx", "xlsx")
+        # 未知的 OLE2 容器：先试 Word，再试 Excel
+        try:
+            return self._soffice_convert(src, tmpdir / f"{stem}.docx", "docx")
+        except Exception:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            return self._soffice_convert(src, tmpdir / f"{stem}.xlsx", "xlsx")
+
     def to_ooxml(self, src: Path, kind: str) -> Path:
         """按真实类型把老式文件转成 OOXML，返回临时文件路径（调用方负责删除）。"""
         tmpdir = Path(tempfile.mkdtemp(prefix="doc2md_com_"))
         stem = src.stem[:80] or "file"
+        if os.name != "nt":
+            return self._soffice_to_ooxml(src, kind, tmpdir)
         if kind in ("doc",):
             return self.doc_to_docx(src, tmpdir / f"{stem}.docx")
         if kind in ("xls",):

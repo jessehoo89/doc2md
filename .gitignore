@@ -90,3 +90,4 @@ $RECYCLE.BIN/
 # 也没法把我们的改动 PR 回去。上面的 `*.md` / `*.log` 等规则会误伤它们的文档，
 # 这里统一放行（必须写在最后：后面的规则覆盖前面的）。
 !vendor/**
+!/.github/release-notes-template.md

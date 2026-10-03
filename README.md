@@ -9,7 +9,8 @@
 ```
 ┌── 本地直转（不联网、最快） ────────────────────────────────┐
 │  .docx  → mammoth        .xlsx → openpyxl                 │
-│  .doc   → Office COM     .xls  → Office COM               │
+│  .doc/.xls → Office COM（Windows）                        │
+│            → LibreOffice soffice（Linux）                 │
 │  有文本层 PDF → pymupdf4llm（带可信度复核，防"假文本层"）  │
 └───────────────────────────────────────────────────────────┘
 ┌── 扫描件 / 无文本层 PDF → OCR ─────────────────────────────┐
@@ -23,7 +24,28 @@
 
 ---
 
+## 平台支持
+
+Windows 与 Linux 都可用；macOS 未验证。两者差异只在老式 `.doc` / `.xls` 的转换通道与打包产物上，
+其余功能（断点续传、监控、云端 OCR、空文档与加密文件判定）一致。
+
+| 事项 | Windows | Linux |
+|---|---|---|
+| 老式 `.doc` / `.xls` / `.wps` / `.et` | 本机 Office / WPS 的 COM | LibreOffice `soffice --headless`（需自行安装） |
+| 依赖声明 | `pywin32`（`sys_platform == "win32"` 条件安装） | 系统包 `libreoffice-writer` + `libreoffice-calc` |
+| 启动入口 | `.bat` 菜单 / GUI / 命令行 | 命令行（`python -m doc2md ...`） |
+| 单文件安装程序 / EXE 打包 | 有 | 无 |
+
+代码里的分叉点只有三处：
+
+- `doc2md/com.py`：`to_ooxml()` 在 `os.name != "nt"` 时走 LibreOffice 分支，Windows 的 COM 原路径不变。
+- `doc2md/detect.py`：OLE2 类型判定先扫前 16KB，未认出 `WordDocument` 时用内置 `CfbReader` 精确解析目录项。
+  原因：LibreOffice 写出的 `.doc` 目录扇区落在 16KB 之后，老办法会被流数据里的巧合字节 `Book` 误判成 xls。
+- `requirements.txt`：`pydantic` 是 `vendor/ZhDocParser`（rule 档 PDF 引擎）的直接依赖，单独列出。
+
 ## 快速开始
+
+### Windows
 
 ```bat
 :: 1) 建虚拟环境（一次即可）
@@ -55,6 +77,34 @@ copy .env.example .env
 查找顺序：`%DOC2MD_PYTHON%` → `.venv\Scripts\python.exe` → `venv\Scripts\python.exe`
 → PATH 上第一个真能跑的 `python`（微软商店那个占位程序会被识别并跳过）。
 
+### Linux
+
+```bash
+# 1) 老式 .doc/.xls 的转换靠 LibreOffice（Debian/Ubuntu，只要 Writer + Calc）
+sudo apt install -y libreoffice-writer libreoffice-calc
+
+# 2) 建虚拟环境（一次即可）
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+
+# 3) 生成配置文件，然后把 roots 改成你的语料目录
+cp config.example.json config.json
+
+# 4) 填云端 OCR 凭据（不填也能跑，只是扫描件没有云端后端）
+cp .env.example .env
+
+# 5) 试运行：看清每个文件会走哪条通道，不写任何文件
+.venv/bin/python -m doc2md scan
+
+# 6) 正式转换 / 常驻监控
+.venv/bin/python -m doc2md run
+.venv/bin/python -m doc2md watch
+```
+
+Linux 下没有 `.bat` 入口：`scan / convert / run / watch / stats / retry` 这些菜单项
+都有同名子命令，`python -m doc2md --help` 可查。图形界面（`gui.py`，Tkinter）在
+Linux 上未验证，需要自备带 tkinter 的完整 Python。
+
 ---
 
 ## 目录结构
@@ -72,7 +122,7 @@ doc2md/
 │   ├── mineru.py           #   MinerU 客户端（precision / agent 两种模式）
 │   ├── vlm.py              #   通用 OpenAI 兼容视觉模型客户端（接专用 OCR 模型）
 │   ├── local_ocr.py        #   本地 RapidOCR 子进程客户端（可选）
-│   ├── com.py              #   Office COM 转换（.doc/.xls）
+│   ├── com.py              #   .doc/.xls 转换（Windows COM / 其他平台 LibreOffice）
 │   ├── watcher.py          #   实时监控模式
 │   ├── config.py           #   配置加载 + .env 凭据注入
 │   └── state.py            #   SQLite 状态库（断点续传的依据）
@@ -308,7 +358,7 @@ python -m venv .venv-gui
 - **监控模式**：立即停止，`WatchService` 退出，监控句柄释放。
 - **批量转换 / 重试**：**当前正在转换的那个文件会做完**，其余任务不再开始 ——
   不会留下半个 md。已完成的文件已经入库，所以再点一次「开始转换」会自动跳过它们，
-  从中断处继续。这是刻意的：中途硬杀线程会让 Office COM 进程和云端任务悬空。
+  从中断处继续。这是刻意的：中途硬杀线程会让 Office COM（Linux 上是 soffice）进程和云端任务悬空。
 
 ---
 
@@ -703,7 +753,7 @@ datas += collect_data_files("pymupdf", subdir="layout")   # 约 49 MB
 
 | 能力 | 原因 |
 |---|---|
-| `.doc` / `.xls` / `.wps` / `.et` | 走本机 WPS/Office 的 COM，**目标机必须装 Office 或 WPS** |
+| `.doc` / `.xls` / `.wps` / `.et` | Windows 走本机 WPS/Office 的 COM，Linux 走 LibreOffice；**目标机必须装其中之一** |
 | 本地 RapidOCR | 需要另一套装了 `rapidocr` + `onnxruntime` 的解释器，用 `local_ocr.python_exe` 指过去 |
 
 云端 OCR 链路（paddle / mineru / siliconflow）不受影响，Token 照旧放 `.env`。
@@ -803,7 +853,7 @@ Windows 控制台默认 GBK，而界面文案里用了 `⭐ ⚠ ↳ ↔ ✓ ✗ 
 | **加密的老式 .doc / .xls** —— 格式没变，靠标记位声明有密码 | Word 读 FIB 的 `fEncrypted` 位；Excel 走 BIFF 的 `FILEPASS` 记录 | 同上 |
 
 为什么要费劲去认：不认的话，加密的 `.docx` 会被 `sniff()` 按扩展名当成老 doc
-送进 COM，WPS 回一句「文档打开失败」—— 看着像文件损坏，其实只差一个密码；
+送进转换器（Windows 的 COM / Linux 的 soffice），WPS 回一句「文档打开失败」—— 看着像文件损坏，其实只差一个密码；
 然后它每次 `run` / `retry` 都再报一次，把真正需要处理的问题淹掉。
 
 识别逻辑全在 `detect.py`（`CfbReader` / `encryption_reason` / `docx_is_empty`），
@@ -825,7 +875,7 @@ Windows 控制台默认 GBK，而界面文案里用了 `⭐ ⚠ ↳ ↔ ✓ ✗ 
 - `config.json` 的 `output` 段支持热加载（约 2 秒生效），`ocr` 段的改动需要重启。
 - `state.db` 是断点续传的唯一依据，**不要提交、也不要随意删除**；想重转某批
   文件，从状态库里删掉对应记录即可（`scripts/` 里有现成的工具）。
-- `.doc` / `.xls` 走 Office COM，需要本机装了 Office；没有时会走降级路径。
+- `.doc` / `.xls` 的转换需要本机有转换器：Windows 用 WPS/Office 的 COM，Linux 用 LibreOffice；都没有时会走降级路径。
 - 本地 OCR 需要**另一个**装了 `rapidocr` + `onnxruntime` 的 Python 环境，
   在 `local_ocr.python_exe` 里指过去；不装也不影响，云端链路能覆盖。
 - **图形界面需要 .venv-gui**（带 tkinter 的完整 Python），`.venv` 跑不了 ——

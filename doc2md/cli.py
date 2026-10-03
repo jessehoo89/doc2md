@@ -26,10 +26,13 @@ from pathlib import Path
 from .config import (
     ENV_FILE,
     Config,
+    cred_key_list,
     describe_backends,
     describe_credentials,
     describe_env_file,
     describe_output,
+    describe_tokens,
+    env_template_text,
     load_config,
     mask_token,
 )
@@ -316,27 +319,11 @@ def cmd_ping(args, cfg: Config) -> int:
     return 0 if ok_n > 0 else 1
 
 
-# 工具认得的凭据键（按展示顺序），值是一句话用途说明
-_CRED_KEYS: tuple[tuple[str, str], ...] = (
-    ("DOC2MD_MINERU_TOKEN", "MinerU Token（precision / agent 通用）"),
-    ("MINERU_TOKEN", "MinerU Token 的旧别名"),
-    ("DOC2MD_MINERU_BASE_URL", "MinerU 服务地址（自建 / 代理才需要）"),
-    ("PADDLEOCR_MCP_AISTUDIO_ACCESS_TOKEN", "PaddleOCR 访问令牌（官方 MCP 用的名字）"),
-    ("DOC2MD_PADDLE_TOKEN", "PaddleOCR 访问令牌（别名，优先级更高）"),
-    ("DOC2MD_SILICONFLOW_TOKEN", "硅基流动 Token（sf-deepseek-ocr 后端）"),
-    ("SILICONFLOW_API_KEY", "硅基流动 Token 的别名"),
-    ("DOC2MD_VLM_TOKEN", "通用 VLM 兜底 Token（不按厂商区分，慎用）"),
-    ("DOC2MD_VLM_BASE_URL", "VLM 服务地址（换平台才需要）"),
-)
+# 工具认得的凭据键清单（含别名与用途说明）来自 config.CRED_FIELDS 这一份唯一定义，
+# 免得界面能填、命令行却报"未配置"。
+_CRED_KEYS: tuple[tuple[str, str], ...] = cred_key_list()
 
-_ENV_TEMPLATE = """
-# 云端 OCR 凭据文件（改完需重启程序）
-DOC2MD_MINERU_TOKEN=
-
-PADDLEOCR_MCP_AISTUDIO_ACCESS_TOKEN=
-
-DOC2MD_SILICONFLOW_TOKEN=
-"""
+_ENV_TEMPLATE = env_template_text()
 
 
 def cmd_env(args, cfg: Config) -> int:
@@ -346,6 +333,7 @@ def cmd_env(args, cfg: Config) -> int:
     print("=" * 74)
     print(f"  凭据文件 : {describe_env_file(cfg)}")
     print("  优先级   : 系统环境变量 > .env 文件 > config.json 的 token 字段")
+    print(f"  填写情况 : {describe_tokens()}")
     print()
     if cfg.env_file is None:
         print(f"  [提示] 没有找到凭据文件：{ENV_FILE}")
@@ -374,7 +362,8 @@ def cmd_env(args, cfg: Config) -> int:
     print("  说明：MinerU 轻量接口（agent）免鉴权，不填 Token 也能当兜底；")
     print("        但**只有 precision 模式会返回插图**，要插图就必须填 Token。")
     print("        sf-deepseek-ocr（硅基流动）只出文字不返回插图，排在需要插图的后端之后。")
-    print("        改完凭据文件后需要重启程序；填好后用 python -m doc2md ping 验证连通性。")
+    print("        填好后用 `python -m doc2md ping` 或图形界面的「检测云端 OCR」验证连通性。")
+    print("        图形界面里可以直接填：「填写云端 OCR Token…」按钮，保存即生效。")
     print("=" * 74)
     return 0
 

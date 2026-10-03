@@ -77,12 +77,18 @@ doc2md/
 │   └── state.py            #   SQLite 状态库（断点续传的依据）
 ├── tests/                  # 回归 / 集成测试
 ├── scripts/                # 运维脚本（清理、体检、隔离，默认 dry-run）
+├── installer/              # 单文件安装程序
+│   ├── installer_app.py    #   安装程序本体（自解压 + Tk 界面 + 提权 + 建快捷方式）
+│   ├── installer.spec      #   PyInstaller 配置（onefile，载荷内嵌）
+│   └── uninstall.bat       #   随安装释放的卸载脚本（自动提权）
 ├── devkit.py               # 开发辅助：从 config.json 的 roots 自动挑样例
 ├── gui.py                  # 图形界面（Tkinter，零新增依赖）
 ├── launcher.py             # 菜单式启动器（被 文档转MD.bat 调用）
 ├── app.py                  # 统一入口：带参数走命令行、无参数进菜单或图形界面
+├── make_installer.py       # 打包编排：应用 → 载荷 → 单文件安装程序
 ├── doc2md.spec             # PyInstaller 打包配置（一份 Analysis 造两个 exe）
-├── 打包EXE.bat             # 双击生成 dist\doc2md\doc2md.exe 与 doc2md-gui.exe
+├── 打包安装包.bat          # 双击生成 dist-installer\doc2md-安装程序.exe
+├── 打包EXE.bat             # 双击只生成 dist\doc2md\ 下的两个 exe
 ├── 文档转MD-GUI.bat        # 双击打开图形界面
 ├── config.example.json     # 配置模板（提交进仓库；真正的 config.json 被忽略）
 ├── .env.example            # 凭据模板（同上）
@@ -144,6 +150,7 @@ dist\doc2md\doc2md-gui.exe
 | 查看统计 | `status` |
 | 重试失败 | `retry` |
 | 检测云端 OCR | `ping` + 凭据自检 |
+| 填写云端 OCR Token… | 写 `.env`，等价于手工编辑凭据文件（界面更省事，见下） |
 
 左侧的**处理目录 / 输出方式 / 保留原文件 / 云端 OCR / 本地 OCR** 改动会直接
 写回 `config.json`（原子替换，`_xxx说明` 注释与多后端链路配置原样保留），
@@ -151,6 +158,24 @@ dist\doc2md\doc2md-gui.exe
 
 **日志面板与命令行输出完全一致**，可直接对照排查；`运行日志 → 另存为` 能把
 整段日志存成 txt。
+
+### 填 Token：界面里的「填写云端 OCR Token…」
+
+装机包按约定**不带 `.env`**（凭据不进版本库），所以填 Token 做成了界面动作：
+
+- 左侧配置面板上有个 **「填写云端 OCR Token…」** 按钮，菜单 `文件 → 填写云端 OCR Token…` 同效；
+- **第一次打开程序**（配置目录下还没有 `.env`）时会自动弹一次，点「稍后再说」即可跳过，之后只在日志里提示；
+- 每个输入框旁有「显示」开关（默认打码）与「到哪申请」的说明；
+- 常用三项（PaddleOCR / MinerU / 硅基流动）直接列出，自建服务地址等收在「显示高级选项」里；
+- **保存立即生效，不用重启**：写盘的同时就把值灌进当前进程的环境变量，随后刷新配置摘要；
+  想顺手验一下连通性就点「保存并检测连通性」；
+- 写入是**原子替换**，并且**保留你手写的注释、空行、顺序和工具不认识的键** ——
+  不会把你整理过的 `.env` 冲成模板；
+- 值里含 `#` 或首尾空格时会自动加引号，避免读回来被当成行尾注释截断。
+
+不想用界面也行：菜单 `文件 → 打开凭据文件 (.env)` 或用记事本改，效果一样。
+两种方式写的是**同一个文件**（`config.json` 同目录的 `.env` 优先，其次是
+`DOC2MD_ENV_FILE` 指定的、再其次是程序目录的），读写两侧用的是同一条查找顺序。
 
 ### 关于 `.venv-gui`：为什么需要第二个环境
 
@@ -241,6 +266,15 @@ python -m venv .venv-gui
 跨厂商后端**不继承**彼此的 Token 与服务地址（这条踩过坑：Paddle 的 Token 被
 继承给 MinerU 轻量接口 → 401 → 该后端被永久熔断，备用通道形同虚设）。
 
+### 填 Token 不用手改文件
+
+图形界面里点 **「填写云端 OCR Token…」** 即可（详见上文「图形界面」一节）。
+它会写**真正生效的那个** `.env`，保存后当场生效，并且保留文件里原有的注释与
+你自定义的键。命令行侧用 `python -m doc2md env` 查看填写情况（只显示脱敏值）。
+
+界面能填的键与命令行认得的键来自 `config.CRED_FIELDS` **同一份定义**，
+不存在"界面里填好了、命令行说没配"的错位。
+
 ---
 
 ## 开发与测试
@@ -251,6 +285,15 @@ python -m venv .venv-gui
 
 :: 输出命名策略端到端（需要一个真实 docx + xlsx 做样本）
 .venv\Scripts\python.exe tests\test_output_naming.py
+
+:: 空文档 / 加密文件的归类（夹具现场构造，不依赖个人语料）
+.venv\Scripts\python.exe tests\test_encrypted_empty.py
+
+:: 凭据文件读写：保留注释、引号转义、置空删除、写完即时生效
+.venv\Scripts\python.exe tests\test_token_env.py
+
+:: 「填写 Token」对话框端到端（要桌面会话；看不到界面时自动跳过）
+.venv-gui\Scripts\python.exe tests\gui_token_smoke.py
 
 :: 全链路冒烟：故意把链路首端设成坏后端，验证熔断切换（联网、会消耗 MinerU 额度）
 .venv\Scripts\python.exe tests\test_engine_smoke.py
@@ -267,7 +310,118 @@ python -m venv .venv-gui
 
 ---
 
+## 安装版（单文件安装程序）
+
+不想装 Python、也不想碰命令行时，用构建出来的**单文件安装程序**：
+
+```bat
+:: 打包（必须用带 tkinter 的 .venv-gui；或直接双击 打包安装包.bat）
+.venv-gui\Scripts\python.exe make_installer.py --force
+
+:: 产物
+dist-installer\doc2md-安装程序.exe     ≈ 84 MB，就一个文件
+dist-installer\doc2md-payload.zip      裸载荷：解压即用的绿色版
+```
+
+> **改了 `gui.py` / `doc2md\` 里的代码，一定要加 `--force`。** 不加的话第 1 步会看到
+> `dist\doc2md` 里已有 exe 就跳过，安装包内嵌的还是旧构建 —— 表现就是"源码里加了功能、
+> 装出来却没有"。这个坑真踩过：界面上多了「填写云端 OCR Token」，安装版里找不到。
+
+一条命令跑完「应用 → 载荷 → 安装包」：
+
+| 步骤 | 做什么 |
+|---|---|
+| 1 | PyInstaller + `doc2md.spec` → `dist\doc2md\`（两个 exe 共享 `_internal\`） |
+| 2 | 直接把两个 exe + `_internal\` + `README.md` + `LICENSE` + 示例配置 + `uninstall.bat` 映射进 zip（**无中间暂存目录**，少复制 1000 多个文件） |
+| 3 | 压成 `build\doc2md-payload.zip` |
+| 4 | PyInstaller + `installer\installer.spec` → 单文件安装程序（载荷内嵌其中） |
+
+> 本机与外发目标都不保证装过 Inno Setup / NSIS / 7-Zip，所以安装程序是
+> **只用 Python 标准库 + PyInstaller 自建的自解压包**，零外部工具依赖。
+
+### 安装程序怎么用
+
+```bat
+doc2md-安装程序.exe                      :: 图形界面：选目录、建快捷方式
+doc2md-安装程序.exe /S                   :: 静默装到 C:\Program Files\doc2md
+doc2md-安装程序.exe /S /D=D:\doc2md      :: 静默装到指定目录
+doc2md-安装程序.exe /S /D=... /NOICONS   :: 静默且不建快捷方式
+doc2md-安装程序.exe --help
+```
+
+- 默认装到 `C:\Program Files\doc2md`。**安装程序带 `requireAdministrator` 清单**，
+  双击时 Windows 会直接弹出 UAC 授权框，点「是」即开始安装。
+  > 早先试过"清单用 asInvoker、只在真写不进去时用 `ShellExecuteW("runas")` 自我
+  > 提权"，实测在真实双击场景下不可靠：提权被推到点「开始安装」之后，那一步没成
+  > 就表现为**"调不出 UAC、一直卡在那里"**，还没有任何可读的错误提示。右键「以
+  > 管理员身份运行」能绕过，但用户不该被迫知道这件事。
+- 装到受保护目录（Program Files / Windows）时，安装程序会自动执行
+  `icacls <目录> /grant *S-1-5-32-545:(OI)(CI)M /T`，给 **Users 组补上「修改」权限**。
+  这一步不能省：程序运行期要把 `state.db` / `logs\` / `.env` / `config.json` 写在
+  **自己所在的目录**里（换机器不用改路径），而受保护目录默认对普通用户只读 ——
+  不补权限的话，装完普通双击运行会**存不下配置、建不出 state.db**。
+  用户自己挑的普通目录（`D:\doc2md` 之类）本来就可写，不做任何额外放宽。
+- 装完在安装目录生成 `config.json` 与 `.env` 模板，**只补缺、不覆盖**：升级重装不会动你的
+  配置、凭据和 `state.db`。
+- **装完第一次打开程序会直接把「填写云端 OCR Token…」窗口弹出来**（因为一个 Token 都
+  还没填）。不填也能用 —— 点「稍后再说」，docx / xlsx / 有文字层的 PDF 照常转；这个记号
+  会写进 `.env` 的注释里，之后不再打扰，需要时从菜单或左侧按钮随时再打开。
+- 卸载：安装目录里的 `uninstall.bat`，或「设置 → 应用」里的条目；在 Program Files 下
+  卸载会自动请求提权。
+
+### 安装后目录长什么样
+
+```
+C:\Program Files\doc2md\
+├─ doc2md.exe            控制台版（命令行 / 中文菜单）
+├─ doc2md-gui.exe        窗口版（图形界面）
+├─ README.md             ← 完整文档，人和智能体都读这一份
+├─ LICENSE
+├─ config.json           首次安装自动生成（来自 config.example.json）
+├─ config.example.json
+├─ .env                  首次安装自动生成（来自 .env.example，值是空的）
+│                        打开程序会提示填 Token，也可以直接编辑本文件
+├─ .env.example
+├─ uninstall.bat         卸载
+└─ _internal\            约 155 MB 运行时（Python / Tk / pymupdf …），别删
+```
+
+### 供自动化 / 智能体（LLM harness）调用
+
+安装后**不需要装 Python，也不需要配任何环境变量**。给自动化程序或大模型 harness 的调用约定：
+
+| 项 | 值 |
+|---|---|
+| 可执行文件 | `<安装目录>\doc2md.exe`（默认 `C:\Program Files\doc2md\doc2md.exe`） |
+| 调用形式 | `doc2md.exe <子命令> [公共参数]`，与 `python -m doc2md <子命令>` 完全等价 |
+| 交互性 | 所有子命令**都不需要 TTY 输入**；输出为 UTF-8 文本；退出码 `0` 表示成功 |
+| 能力发现 | `doc2md.exe --help` 列出全部子命令与参数 |
+| 文档 | `<安装目录>\README.md`（就是本文件） |
+| 配置 / 凭据 | `<安装目录>\config.json`、`<安装目录>\.env` |
+| 状态库 | `<安装目录>\state.db`（断点续传唯一依据，删掉会全量重转） |
+| 路径解析 | 一切相对 **exe 所在位置**，不依赖当前工作目录 |
+
+> **请用 `doc2md.exe` 而不是 `doc2md-gui.exe`。** 两者其实是同一份代码、命令行接口
+> 完全一样（只要带参数就走 CLI，与是哪个 exe 无关）；但 `doc2md-gui.exe` 是 GUI 子系统、
+> 不自带控制台，输出得靠重定向或管道才拿得到。脚本化调用一律用 `doc2md.exe`。
+
+典型调用：
+
+```bat
+set D=C:\Program Files\doc2md
+"%D%\doc2md.exe" scan   --root "E:\语料"    :: 试运行，不写任何文件
+"%D%\doc2md.exe" run    --root "E:\语料"    :: 正式转换，中断可续传
+"%D%\doc2md.exe" status                     :: 统计与各后端今日配额
+"%D%\doc2md.exe" ping                       :: 云端 OCR 后端连通性
+```
+
+---
+
 ## 打包成 Windows EXE
+
+> 想要**单文件安装包**（而不是裸的 `dist\doc2md\` 文件夹），见上一节
+> [安装版（单文件安装程序）](#安装版单文件安装程序) —— `make_installer.py` 正是在
+> 这一节的基础上再套一层自解压。
 
 目标机器不想装 Python 时，把程序打成独立可执行文件：
 

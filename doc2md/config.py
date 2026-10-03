@@ -115,6 +115,130 @@ def load_env_file(path: str | Path | None = None, *, force: bool = False
     return p, applied
 
 
+def env_file_path(config_path: str | Path | None = None) -> Path:
+    """**真正生效**的凭据文件路径：读它、也写它。
+
+    查找顺序必须与 load_config 完全一致 ——
+      1. `config.json` 同目录的 `.env`（最优先）
+      2. 否则 DOC2MD_ENV_FILE 指定的文件
+      3. 再否则程序目录的 `.env`（第 1 条在程序目录下就是它）
+
+    写的时候用同一个顺序**不是为了整齐，是为了不出现"读一份、写另一份"**：
+    曾经界面按程序目录写、配置按 config.json 同目录读，结果是界面上显示
+    "已保存"、实际一点没生效，而且日志里看不出任何异常。
+    """
+    cfg = Path(config_path) if config_path else DEFAULT_CONFIG
+    cand = cfg.parent / ".env"
+    if cand.exists():
+        return cand
+    raw = os.environ.get("DOC2MD_ENV_FILE", "").strip()
+    if raw and raw.lower() not in _ENV_FILE_OFF:
+        # 显式指定就完全听它的，即使文件还不存在 —— 读的一侧（load_env_file）
+        # 认的也是这个路径，两边必须一致，否则又会回到"读一份写另一份"。
+        return Path(raw)
+    if cfg.parent != TOOL_DIR and ENV_FILE.exists():
+        return ENV_FILE
+    # 都还没有：落到 config.json 同目录 —— 那是下次启动最先被读到的地方
+    return cand
+
+
+def _line_key(raw: str) -> str | None:
+    """从 .env 的一行里取出键名；认不出来（注释 / 空行 / 没等号）返回 None。
+
+    规则必须与 _parse_env_text 完全一致 —— 否则会出现"写进去的键读不出来"：
+    比如 `export FOO=1` 若在这里被跳过，就会在文件末尾再追加一行 FOO，
+    于是同一个键出现两次，而读的时候后写的那个才生效。
+    """
+    line = raw.strip()
+    if not line or line[0] in "#;":
+        return None
+    if line.lower().startswith("export "):
+        line = line[7:].lstrip()
+    if "=" not in line:
+        return None
+    key = line.split("=", 1)[0].strip()
+    return key or None
+
+
+def _encode_env_value(val: str) -> str:
+    """把值转成 .env 里应有的写法。
+
+    不加引号时，解析侧会做两件事：去掉行尾 ` #注释`、丢掉首尾空白。
+    所以值里含 `#`、或本来就有首尾空白（Token 常被复制进多余空格）时，
+    必须加引号 —— 否则用户填的串会被悄悄改掉，随后 401。
+    """
+    v = str(val).strip()
+    if not v:
+        return ""
+    if "#" not in v and v == str(val) and '"' not in v and "'" not in v:
+        return v
+    for q in ('"', "'"):
+        if q not in v:
+            return f"{q}{v}{q}"
+    return v                      # 两种引号都占了：原样写，至少不损坏文件结构
+
+
+def save_env_values(values: dict[str, str | None], path: str | Path | None = None) -> Path:
+    """把若干键写回凭据文件，**保留原文件的注释、空行、顺序与其它键**。
+
+    values 的语义：
+      · 非空字符串 → 写成 `KEY=值`
+      · 空串 / 全空白 → 写成 `KEY=`（等价于"置空"，该键不生效）
+      · None       → 删掉该键所在的那一行
+
+    写完后当场把改动灌进 os.environ，所以**改完不必重启程序**：有值的键直接覆盖
+    （用户刚在界面上敲的意图优先于文件里的旧值），置空 / 删除的键从 os.environ
+    里摘掉，免得旧 Token 继续生效。未提到的键一律不动 —— 真·系统环境变量依旧
+    优先于文件，这一点没有被破坏。
+
+    为什么放在 config.py：GUI 的「填写 Token」对话框和将来的安装器都要写这份文件，
+    解析与序列化必须是**同一份实现**，否则读写两侧的规则会各自漂移。
+    """
+    p = Path(path) if path else env_file_path()
+    out: list[str] = []
+    if p.exists():
+        try:
+            text = p.read_text(encoding="utf-8-sig")      # 容忍记事本写出的 BOM
+        except UnicodeDecodeError:
+            text = p.read_text(encoding="gbk", errors="replace")
+        out = text.splitlines()
+
+    pending = {k: v for k, v in values.items() if isinstance(k, str) and k}
+    kept: list[str] = []
+    for raw in out:
+        key = _line_key(raw)
+        if key is None or key not in pending:
+            kept.append(raw)
+            continue
+        val = pending.pop(key)
+        if val is None:
+            continue                                      # 删除整行
+        kept.append(f"{key}={_encode_env_value(val)}")
+    if pending:
+        if kept and kept[-1].strip():
+            kept.append("")
+        for key, val in pending.items():
+            if val is not None:
+                kept.append(f"{key}={_encode_env_value(val)}")
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text("\n".join(kept).rstrip("\n") + "\n", encoding="utf-8", newline="\n")
+    os.replace(tmp, p)                                    # 原子替换：写一半断电不会毁掉旧凭据
+
+    for key, val in values.items():
+        if not isinstance(key, str) or not key:
+            continue
+        text_val = "" if val is None else str(val).strip()
+        if text_val:
+            os.environ[key] = text_val
+            _ENV_FILE_KEYS.add(key)
+        else:
+            os.environ.pop(key, None)
+            _ENV_FILE_KEYS.discard(key)
+    return p
+
+
 def _backend_env_key(name: str) -> str:
     """按后端名精确指定 Token 的环境变量名，如 mineru-agent → DOC2MD_TOKEN_MINERU_AGENT。"""
     if not name:
@@ -176,6 +300,168 @@ def mask_token(token: str) -> str:
     if len(t) <= 12:
         return t[:2] + "*" * (len(t) - 2) if len(t) > 3 else "***"
     return f"{t[:4]}…{t[-4:]}（{len(t)} 位）"
+
+
+@dataclass(frozen=True)
+class CredField:
+    """「填写 Token」界面的一个输入项，同时也是 CLI 自检要列出的键。"""
+
+    key: str                      # 写进 .env 的环境变量名
+    label: str                    # 中文名
+    hint: str                     # 一句话说明：填了有什么用、不填会怎样
+    where: str = ""               # Token 到哪儿申请（界面里当提示显示）
+    advanced: bool = False        # 高级项：界面默认折叠
+    aliases: tuple[str, ...] = ()  # 认得的别名，诊断时一并列出
+    alias_note: str = "旧别名（仍然认得，但优先级低于上面的规范名）"
+
+
+# 界面与命令行**共用唯一一份**凭据键清单。两处各写一份必然漂移，
+# 典型症状是「界面上能填、命令行却说未配置」。
+CRED_FIELDS: tuple[CredField, ...] = (
+    CredField(
+        "PADDLEOCR_MCP_AISTUDIO_ACCESS_TOKEN", "PaddleOCR 访问令牌",
+        "默认链路首选，扫描件与无文本层的 PDF 都走它。不填则扫描件只剩 "
+        "MinerU 免鉴权接口兜底，精度会明显下降。",
+        where="百度 AI Studio 星河社区 → 访问令牌",
+        aliases=("DOC2MD_PADDLE_TOKEN",),
+        # 这一条是例外：PaddleOCR 的取值链里别名在前（见 load_config），
+        # 所以别名反而**优先于**规范名。不写明的话用户两边各填一个不同的值会
+        # 得到"以哪个为准"完全看不出来的结果。
+        alias_note="别名，优先级高于规范名（历史原因；两个都填了以它为准，建议只填一个）",
+    ),
+    CredField(
+        "DOC2MD_MINERU_TOKEN", "MinerU Token",
+        "precision 精度解析要它（会返回插图）。留空不报错：轻量接口免 Token，"
+        "但只出文字、不回插图。",
+        where="mineru.net → API 管理",
+        aliases=("MINERU_TOKEN",),
+    ),
+    CredField(
+        "DOC2MD_SILICONFLOW_TOKEN", "硅基流动 Token",
+        "sf-deepseek-ocr 专用 OCR 模型，PDF 可直传。作为第三道兜底，只出文字不返回插图。",
+        where="siliconflow.cn 控制台 → API 密钥",
+        aliases=("SILICONFLOW_API_KEY",),
+    ),
+    CredField(
+        "DOC2MD_VLM_TOKEN", "通用 VLM 兜底 Token",
+        "只有接了自建或其它 OpenAI 兼容视觉模型时才需要；它不按厂商区分，慎用。",
+        advanced=True,
+    ),
+    CredField(
+        "DOC2MD_MINERU_BASE_URL", "MinerU 服务地址",
+        "自建或走代理时填，留空用官方 https://mineru.net。",
+        advanced=True,
+    ),
+    CredField(
+        "DOC2MD_VLM_BASE_URL", "VLM 服务地址",
+        "换成别的 OpenAI 兼容平台时才填，留空用 config.json 里的 base_url。",
+        advanced=True,
+    ),
+)
+
+
+def cred_key_list() -> tuple[tuple[str, str], ...]:
+    """(键名, 用途说明) 的完整清单，供 CLI 的 `env` 自检逐条列出。"""
+    out: list[tuple[str, str]] = []
+    for f in CRED_FIELDS:
+        out.append((f.key, f"{f.label}：{f.hint}"))
+        out.extend((a, f"{f.label} 的{f.alias_note}") for a in f.aliases)
+    return tuple(out)
+
+
+def filled_aliases() -> list[str]:
+    """哪些**别名**键当前有值。用于提醒"界面保存的是规范名，别名优先级不同"。"""
+    return [a for f in CRED_FIELDS for a in f.aliases
+            if (os.environ.get(a) or "").strip()]
+
+
+def env_template_text() -> str:
+    """生成凭据文件模板。
+
+    与 CRED_FIELDS 同源，不会出现「模板里有这个键、界面却不认」的漂移。
+    """
+    lines = [
+        "# 云端 OCR 凭据文件",
+        "#",
+        "# 填法：Token 直接跟在等号后面（不要加空格）；以 # 开头的是注释。",
+        "# 留空＝不启用对应后端，不影响其它后端。",
+        "# 取值优先级：系统环境变量 > 本文件 > config.json 里的 token 字段。",
+        "#",
+        "# 也可以完全不碰这个文件 —— 直接打开图形界面，用「填写云端 OCR Token」按钮填。",
+        "",
+    ]
+    for f in CRED_FIELDS:
+        lines.append(f"# {f.label}：{f.hint}")
+        if f.where:
+            lines.append(f"#   到哪申请：{f.where}")
+        lines.append(f"{f.key}=")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def cred_field(key: str) -> CredField | None:
+    """按环境变量名（含别名）找到对应的输入项。"""
+    for f in CRED_FIELDS:
+        if f.key == key or key in f.aliases:
+            return f
+    return None
+
+
+def any_token_filled() -> bool:
+    """常用三项里有没有填上任何一个（高级项不算）。"""
+    return any((os.environ.get(f.key) or "").strip()
+               for f in CRED_FIELDS if not f.advanced)
+
+
+# 「首次启动提示填 Token」的"以后再说"记号。写成 .env 里的一行注释：
+# 不额外造文件、人也能一眼看懂，而且注释行本来就被解析器跳过，天然无害。
+_TOKEN_PROMPT_MARK = "# DOC2MD_TOKEN_PROMPT=skipped"
+
+
+def token_prompt_dismissed(path: str | Path | None = None) -> bool:
+    """用户是不是已经说过「以后再说」（不再自动弹填写窗口）。"""
+    p = Path(path) if path else env_file_path()
+    try:
+        return _TOKEN_PROMPT_MARK in p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return False
+
+
+def dismiss_token_prompt(path: str | Path | None = None) -> Path:
+    """记下「以后再说」。文件不存在也会建，免得下次又弹。"""
+    p = Path(path) if path else env_file_path()
+    try:
+        old = p.read_text(encoding="utf-8-sig", errors="replace") if p.exists() else ""
+    except OSError:
+        old = ""
+    if _TOKEN_PROMPT_MARK in old:
+        return p
+    lines = old.splitlines()
+    if not any(ln.strip() for ln in lines):
+        lines = ["# 云端 OCR 凭据文件（还没填过 Token；要填请用图形界面的"
+                 "「填写云端 OCR Token…」按钮）", ""]
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.append(_TOKEN_PROMPT_MARK)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8", newline="\n")
+    return p
+
+
+def describe_tokens(limit: int = 0) -> str:
+    """一句话说明常用 Token 的填写情况，例如「2/3 已填（PaddleOCR、MinerU）」。
+
+    只报**填写状态**，不泄露任何 Token 内容。
+    """
+    fields = [f for f in CRED_FIELDS if not f.advanced]
+    if limit:
+        fields = fields[:limit]
+    filled, missing = [], []
+    for f in fields:
+        (filled if (os.environ.get(f.key) or "").strip() else missing).append(f.label)
+    if not filled:
+        return f"0/{len(fields)} 已填（云端 OCR 会退化到免鉴权接口）"
+    return f"{len(filled)}/{len(fields)} 已填（{'、'.join(filled)}）"
 
 
 @dataclass

@@ -128,6 +128,72 @@ check("打包前挪开 PyInstaller workpath",
 check("没有对 dist/doc2md 直接 rmtree",
       "rmtree(DIST_APP" not in maker, "会撞上批量删除防护、构建中断")
 
+# ---- 五、批处理类脚本必须是 CRLF -----------------------------------------------
+# 为什么值得单独测：cmd 在遇到 goto/标签跳转时按**字节偏移**重新定位文件指针。
+# 纯 LF 的 .bat 会让它错位到行中间，把行的**尾巴当命令执行** —— 报错长这样：
+#     'uild' 不是内部或外部命令     ← 第 56 行 "echo ... build single-file installer" 的尾巴
+#     'm'    不是内部或外部命令     ← 任意一行 "rem ..." 去掉 "re"
+#     系统找不到指定的文件。        ← 行里带路径的碎片
+# **构建仍然会成功**，所以只看结果永远发现不了，只在屏幕上刷一堆莫名其妙的报错。
+# 更危险的是 installer/uninstall.bat 也会这样 —— 那是要跑到用户机器上的卸载脚本，
+# 碎片里可能带上 rd / del 的片段。
+#
+# 关键点：`.gitattributes` 里的 `*.bat text eol=crlf` **只在 checkout 时生效**。
+# 文件被工具（编辑器/脚本）重写成 LF 之后，因为 git 在比较时会做归一化，
+# `git status` 是**干净的** —— 也就是说这个毛病能一路混进提交和发布包。
+# 只能靠这条断言在本地拦。
+print("\n[5] 批处理类脚本必须是 CRLF 行尾（纯 LF 会让 cmd 执行行尾碎片）")
+NON_SOURCE_DIRS = {".git", ".venv", ".venv-gui", "build", "dist", "dist-installer",
+                   "__pycache__", "_shot_out"}
+SCRIPT_EXTS = (".bat", ".cmd", ".ps1")
+
+scripts: list[tuple[Path, int, int]] = []
+for _p in sorted(ROOT.rglob("*")):
+    if not _p.is_file() or _p.suffix.lower() not in SCRIPT_EXTS:
+        continue
+    if NON_SOURCE_DIRS & set(_p.parts):
+        continue
+    _raw = _p.read_bytes()
+    _crlf = _raw.count(b"\r\n")
+    scripts.append((_p, _crlf, _raw.count(b"\n") - _crlf))
+
+check("扫到了批处理脚本", len(scripts) >= 6, f"只找到 {len(scripts)} 个，路径判断可能错了")
+_bad_crlf = [(p, crlf, lf) for p, crlf, lf in scripts if crlf == 0 and lf > 0]
+check("没有纯 LF 的批处理脚本", not _bad_crlf,
+      "改成 CRLF 即可；涉及：" +
+      "、".join(f"{p.relative_to(ROOT)}({lf}行)" for p, _, lf in _bad_crlf))
+_bad_mixed = [(p, crlf, lf) for p, crlf, lf in scripts if crlf > 0 and lf > 0]
+check("没有 CRLF/LF 混用的批处理脚本", not _bad_mixed,
+      "混用同样会让 cmd 定位错乱；涉及：" +
+      "、".join(f"{p.relative_to(ROOT)}(CRLF={c},LF={l})" for p, c, l in _bad_mixed))
+
+# ---- 六、卸载程序必须真的进载荷 -----------------------------------------------
+# 这条属于"漏了不报错、但用户装完发现卸不掉"的类型：注册表里的 UninstallString 指向
+# `<安装目录>\uninstall.exe`，载荷里少一个文件它就是个死链，而安装过程**不会**报错。
+print("\n[6] 卸载程序（uninstall.exe）必须被打包编排带上")
+check("installer/uninstaller.spec 存在",
+      (ROOT / "installer" / "uninstaller.spec").is_file())
+check("installer/uninstall_app.py 存在",
+      (ROOT / "installer" / "uninstall_app.py").is_file())
+check("make_installer.py 定义了卸载程序构建步骤",
+      "def build_uninstaller" in maker and "UNINSTALLER_SPEC" in maker)
+check("编排里真的会调用它（不是只定义）",
+      re.search(r"^\s*build_uninstaller\(\)", maker, re.M) is not None,
+      "只定义不调用，载荷里就没有 uninstall.exe")
+check("载荷里带上 uninstall.exe 这个名字",
+      'UNINSTALLER_IN_PAYLOAD = "uninstall.exe"' in maker)
+check("载荷缺卸载程序时直接中止（而不是打个警告继续走）",
+      bool(re.search(r"die\(f\"载荷缺少卸载程序", maker)))
+
+# 卸载程序的编码守卫：它也有控制台文案（/S 模式），且**不能** import doc2md
+# （卸载时 _internal 正在被删，不能依赖被卸载的那套代码）。
+uapp = read(ROOT / "installer" / "uninstall_app.py")
+check("卸载程序自带 stdio 守卫（不 import doc2md）",
+      "def safe_stdio" in uapp and "from doc2md" not in uapp,
+      "卸载时不能依赖正在被删的 doc2md 包")
+check("卸载程序的输出通道会调用 safe_stdio",
+      re.search(r"def setup_output.*?safe_stdio\(\)", uapp, re.S) is not None)
+
 # --------------------------------------------------------------------------- #
 print("\n" + "=" * 74)
 print(f"通过 {PASS}　失败 {len(FAILS)}")

@@ -65,6 +65,7 @@ doc2md/
 │   ├── cli.py              #   命令行入口与各子命令
 │   ├── engine.py           #   调度核心：计划、路由、断点续传、md 落盘
 │   ├── converters.py       #   本地格式转换 + Markdown 清洗与段落重组
+│   ├── pdf_zhdoc.py        #   pdf_engine=rule：接入 vendor/ZhDocParser 的提取器
 │   ├── detect.py           #   真实格式嗅探 + PDF 文本层可信度判定
 │   ├── ocr_router.py       #   多后端路由器：优先级链路 + 熔断切换
 │   ├── ocr.py              #   PaddleOCR 客户端 + 错误分类
@@ -75,12 +76,16 @@ doc2md/
 │   ├── watcher.py          #   实时监控模式
 │   ├── config.py           #   配置加载 + .env 凭据注入
 │   └── state.py            #   SQLite 状态库（断点续传的依据）
+├── vendor/                 # 第三方子项目（git subtree 引入，见 vendor/README.md）
+│   └── ZhDocParser/        #   纯规则 PDF 结构还原（MIT）；只取它的 PdfExtractor
 ├── tests/                  # 回归 / 集成测试
 ├── scripts/                # 运维脚本（清理、体检、隔离，默认 dry-run）
-├── installer/              # 单文件安装程序
+├── installer/              # 安装 / 卸载程序
 │   ├── installer_app.py    #   安装程序本体（自解压 + Tk 界面 + 提权 + 建快捷方式）
 │   ├── installer.spec      #   PyInstaller 配置（onefile，载荷内嵌）
-│   └── uninstall.bat       #   随安装释放的卸载脚本（自动提权）
+│   ├── uninstall_app.py    #   卸载程序本体（Tk 界面 + 静默 + 自删除）
+│   ├── uninstaller.spec    #   PyInstaller 配置（onefile，独立，不依赖 _internal）
+│   └── uninstall.bat       #   卸载兜底脚本（万一 exe 被安全软件拦下）
 ├── devkit.py               # 开发辅助：从 config.json 的 roots 自动挑样例
 ├── gui.py                  # 图形界面（Tkinter，零新增依赖）
 ├── launcher.py             # 菜单式启动器（被 文档转MD.bat 调用）
@@ -107,7 +112,8 @@ doc2md/
 | `python -m doc2md scan` | 试运行：列出待转文件与各自通道，**不写任何文件** |
 | `python -m doc2md run` | 批量转换，中断后重跑自动续传 |
 | `python -m doc2md watch` | 常驻监控新增/修改的文件并自动转换 |
-| `python -m doc2md test <文件>` | 只转一个文件 |
+| `python -m doc2md test <文件>` | 只转一个文件（想看分流详情用这个） |
+| `python -m doc2md convert <路径…>` | **只转点名的文件**，不扫整目录（见 [只转一批文件](#只转一批文件convert)） |
 | `python -m doc2md status` | 统计（含各后端今日用量） |
 | `python -m doc2md retry` | 重试失败的文件（`--clear` 仅清记录） |
 | `python -m doc2md ping` | 检测各云端 OCR 后端的就绪与连通性 |
@@ -116,14 +122,84 @@ doc2md/
 公共参数：`--config <路径>`、`--root <目录>`（可重复，覆盖配置）、
 `--limit N`、`--quiet`、`--no-ocr`。写在子命令前后都认。
 
+`run` 还多一个 `--redo-engine <引擎>`：
+
+```bat
+:: 换了 PDF 引擎（pdf_engine: layout → rule）后，把文字层 PDF 全部重转一遍
+doc2md.exe run --redo-engine pdf-text
+```
+
+原因：状态库里的"已成功"记录会让这些文件**被跳过**（跳过判定 = 库里有记录 **且**
+md 存在）。这个参数只清记录、**不删已产出的 md**，重转时覆盖它们。
+可选值就是状态库里的引擎名：`pdf-text` / `docx` / `xlsx` / `html` / `com-docx` /
+`com-xlsx`（填错会提示当前库里实际有哪些）。想看分布：
+
+```bat
+doc2md.exe status
+```
+
+### 只转一批文件：`convert`
+
+`run` 是"扫 `roots` 下的全部文件"，但实际经常是"**就转这一批**"（补转某几百份、
+或者别处拷来的一批）。为此每次去改 `config.json` 的 `roots` 太别扭，`convert` 就是干这个的：
+
+```bat
+:: 1) 直接在命令行列文件（也可以给目录，按扩展名递归展开）
+doc2md.exe convert a.docx b.pdf "E:\语料\某一批"
+
+:: 2) 给一个清单文件：每行一个路径，# 开头是注释，空行忽略
+doc2md.exe convert --list 清单.txt
+
+:: 3) 从管道读（省得先落一个临时文件）
+dir /b /s *.pdf | doc2md.exe convert --list -
+
+:: 先看解析对不对、各走哪条通道（不写文件，也不清记录）
+doc2md.exe convert --list 清单.txt --dry-run
+
+:: 强制重转（不加则已转过的按幂等跳过）
+doc2md.exe convert --list 清单.txt --force
+```
+
+双击版菜单里也有：**`[L] 按清单批量转换`** —— 会先 `--dry-run` 给你过目，再问一句才真转。
+
+清单的容错（都是实际会遇到的情况）：
+
+- **编码**：`dir /b > 清单.txt` 出来的是 GBK、记事本另存常带 UTF-8 BOM、别处拷来的
+  可能是 UTF-16。按 BOM 判断，无 BOM 时先试 UTF-8 再退 GBK —— **不用自己转码**。
+- 行首尾空白、`"带引号的路径"`（资源管理器「复制为路径」给的就是这种）、
+  从 Excel 粘来的 `路径<Tab>备注` 都会被正确清洗。
+- 相对路径先相对当前目录找，找不到再**相对清单文件所在目录**找 ——
+  清单和文件放一起是最自然的用法。
+- 目录行会按 `watch_extensions` 递归展开，过滤规则与整目录扫描**完全一致**
+  （共用 `engine.iter_docs`，不会出现"整目录跑会转、清单里写同一个目录却不转"）。
+
+⚠ **找不到的条目会被明确报出来**。清单里写错一个字符不会抛异常、只会安静地少转
+一份文件，所以这里宁可多打几行：
+
+```
+  解析结果 : 3 个文件，去重 1，格式不支持 1，找不到 1
+
+  [找不到] 1 条（清单里写了，磁盘上没有）：
+    - 不存在的文件.docx
+```
+
+转换本身走 `run` 的同一套流程 —— 幂等跳过、敏感目录拦截、OCR 故障熔断、断点续传
+一律照旧。清单里的文件**不要求在 `roots` 之下**；但那种情况下 `output.layout = mirror`
+算不出相对路径，会**按文件名平铺到输出根**（CLI 会明确提示，想保留目录结构就用
+`--root` 指定它们的上级目录）。
+
 ---
 
 ## 图形界面（GUI）
 
 ![图形界面](docs/gui-screenshot.png)
 
-左边是配置（处理目录 / 输出方式 / 各项开关 / 当前生效配置，内容多时可滚动），
+左边只有三组**要经常调**的配置（处理目录 / 输出方式 / 各项开关，小窗口或高缩放下可滚动），
 右边是实时日志（按错误、警告、成功着色），底部是进度条。
+
+首页刻意不放低频动作：**保存**（每个动作执行前都会先写回 `config.json`，不用手动存）、
+**打开配置文件 / 凭据文件 / 程序目录** 都收在菜单 `文件` 里。启动时会把当前生效的
+引擎、后端链路、凭据文件、状态库打到日志面板开头，需要对照时看日志就行。
 
 四种打开方式，随便挑一个：
 
@@ -150,7 +226,8 @@ dist\doc2md\doc2md-gui.exe
 | 查看统计 | `status` |
 | 重试失败 | `retry` |
 | 检测云端 OCR | `ping` + 凭据自检 |
-| 填写云端 OCR Token… | 写 `.env`，等价于手工编辑凭据文件（界面更省事，见下） |
+| 设置… | 改 `config.json` 与 `.env`（含云端 OCR Token），等价于手工编辑这两个文件 |
+| 重新加载配置 | 手工改完 `config.json` 后重新读取（并同步左侧面板），不用重启程序 |
 
 左侧的**处理目录 / 输出方式 / 保留原文件 / 云端 OCR / 本地 OCR** 改动会直接
 写回 `config.json`（原子替换，`_xxx说明` 注释与多后端链路配置原样保留），
@@ -159,21 +236,40 @@ dist\doc2md\doc2md-gui.exe
 **日志面板与命令行输出完全一致**，可直接对照排查；`运行日志 → 另存为` 能把
 整段日志存成 txt。
 
-### 填 Token：界面里的「填写云端 OCR Token…」
+### 设置窗口（`文件 → 设置…` / 工具栏「设置…」/ `Ctrl+,`）
 
-装机包按约定**不带 `.env`**（凭据不进版本库），所以填 Token 做成了界面动作：
+常规配置与凭据填写都收在这一个窗口里，四个页签：
 
-- 左侧配置面板上有个 **「填写云端 OCR Token…」** 按钮，菜单 `文件 → 填写云端 OCR Token…` 同效；
-- **第一次打开程序**（配置目录下还没有 `.env`）时会自动弹一次，点「稍后再说」即可跳过，之后只在日志里提示；
-- 每个输入框旁有「显示」开关（默认打码）与「到哪申请」的说明；
-- 常用三项（PaddleOCR / MinerU / 硅基流动）直接列出，自建服务地址等收在「显示高级选项」里；
-- **保存立即生效，不用重启**：写盘的同时就把值灌进当前进程的环境变量，随后刷新配置摘要；
-  想顺手验一下连通性就点「保存并检测连通性」；
+| 页签 | 管什么 |
+|---|---|
+| 转换与引擎 | **`pdf_engine` 引擎选档**、保留原文件、文本层可信度检查、敏感目录拦云端、Excel 读取上限、并发与防抖 |
+| 目录与输出 | 处理目录（增删 / 排序）、输出位置与目录结构、同名冲突策略、状态库与日志路径 |
+| 词表与扩展名 | 排除目录名、敏感词、监控扩展名、图片扩展名（一行一条） |
+| 云端 OCR Token | `CRED_FIELDS` 的全部凭据键，写 `.env` |
+
+**文本型 PDF 的引擎选档**：默认 `rule`（纯规则提取；中文公文 / 国标上标题识别更准，
+约快 15 倍）。要换回旧的模型档就在这个页签选 `layout`。改完只影响**之后**转的文件，
+已转出的 md 不会自动重做 —— 想让它们按新引擎重来，命令行跑 `run --redo-engine pdf-text`。
+
+几条使用上的约定：
+
+- 保存后**左侧配置面板立刻同步**（设置里改过的处理目录 / 输出目录马上反映出来）；
+- 常规配置写 `config.json` 是**原子替换 + 保留其它键**，`_xxx说明` 注释与多后端链路配置原样留下；
+- 凭据**只写你真正改过的键**：与系统环境变量同值的不写回文件，免得把环境变量里的 Token 顺手抄进本机；
+- **保存立即生效，不用重启**：写盘的同时就把值灌进当前进程的环境变量；想顺手验一下连通性就点「保存并检测连通性」；
 - 写入是**原子替换**，并且**保留你手写的注释、空行、顺序和工具不认识的键** ——
   不会把你整理过的 `.env` 冲成模板；
-- 值里含 `#` 或首尾空格时会自动加引号，避免读回来被当成行尾注释截断。
+- 值里含 `#` 或首尾空格时会自动加引号，避免读回来被当成行尾注释截断；
+- **内容区可滚动，而「保存」按钮固定在窗口底部、不在滚动区里**。这是刻意设计的：
+  早先那个独立的「填写 Token」小窗口把按钮和内容放在同一个网格里，还禁止缩放，
+  一展开高级选项按钮就被顶出屏幕，而且无处可滚 —— 用户根本点不到保存。
+  现在高级项**默认就展开**（整页能滚，不需要再折叠），这个坑从根上没有了。
 
-不想用界面也行：菜单 `文件 → 打开凭据文件 (.env)` 或用记事本改，效果一样。
+**第一次打开程序**（还没填过任何 Token）时会把设置窗口直接开到「云端 OCR Token」页；
+不填也能用 —— docx / xlsx / 有文字层的 PDF 照常转。点「稍后再说」会把记号写进
+`.env` 的注释里，之后不再打扰，需要时从菜单或工具栏随时打开。
+
+不想用界面也行：菜单 `文件 → 打开配置文件` / `打开凭据文件 (.env)` 用记事本改，效果一样。
 两种方式写的是**同一个文件**（`config.json` 同目录的 `.env` 优先，其次是
 `DOC2MD_ENV_FILE` 指定的、再其次是程序目录的），读写两侧用的是同一条查找顺序。
 
@@ -229,7 +325,64 @@ python -m venv .venv-gui
 | `overwrite_existing_md` | `overwrite`（默认）比源文件旧就重写 / `skip` 只在缺失时生成 |
 | `sensitive_markers` | 命中这些目录名的文件**禁止上传云端** |
 | `pdf_trust_check` | 复核文本层是否真的可信（防"扫描件自带 OCR 层 / CID 乱码 / 隐形层"） |
+| `pdf_engine` | 文本型 PDF 走哪档引擎：`rule`（默认，纯规则，见下）/ `layout`（ONNX 版面模型，慢十几倍） |
 | `local_ocr.python_exe` | 本地 RapidOCR 环境；**留空即自动禁用本地 OCR** |
+
+### 文本型 PDF 走哪个引擎（`pdf_engine`）
+
+| 值 | 走法 | 适合 |
+|---|---|---|
+| `rule`（**默认**） | **`vendor/ZhDocParser`** 的纯规则提取器（接入层 `doc2md/pdf_zhdoc.py`），零模型、**不 import `pymupdf4llm`** | 中文公文 / 国标 / 规程 / 汇编 |
+| `layout`（可选） | `pymupdf4llm` + 49 MB ONNX 版面模型 | 复杂版面（杂志 / 海报）。项目早期语料都是它产出的 |
+
+`rule` 档读的全是 PDF 里本来就有的数字：每行的**字号 / 粗体 / 坐标**，加上中文公文的
+**编号**（`一、` / `（一）` / `1.1` / `第X条`），表格用 `page.find_tables()`（纯几何：
+找线、找对齐）。同一份 10 页公文实测：
+
+| | 转换 CPU | 标题数 | 认出的 `一、` / `（一）` |
+|---|---|---|---|
+| `layout` | 12.83 s | 2 | 全没认出来 |
+| `rule` | **1.67 s** | **22** | 层级完整（3 个 `一、` + 12 个 `（一）`） |
+
+**为什么规则反而更准**：那份公文的 `一、总体要求` **字号与正文完全相同**（16.0pt）。
+页面上唯一能区分它和正文的东西，就是行首那三个字 `一、`。版面模型只看视觉特征
+（字号 / 行距 / 位置），拿不到"编号 → 层级"这种文本语义；而中文公文和国标的层级是
+**强约束**，正则一抓一个准。
+
+**为什么 rule 档是 vendor 上游而不是自己写一份**：见 [`vendor/README.md`](vendor/README.md)。
+一句话 —— 上游更新能 `git subtree pull` 同步、我们对上游的修正能提 PR 回去、
+不会分叉成两份实现各自漂移。
+
+**12 份真实语料的抽样对照**（按体积分层随机抽，覆盖标准 / 规程 / 公文 / 汇编；
+两档**各跑独立进程**并用 CPU 时间，否则 ONNX Runtime 的常驻线程池会污染计时）：
+
+| 指标 | `layout` | `rule` | |
+|---|---|---|---|
+| 转换 CPU 合计 | 708.3 s | **45.5 s** | 快 **15.6 倍** |
+| 正文字数 | 384173 | 353985 | 覆盖 **92%** |
+| 标题总数 | 1001 | 5516 | rule 召回高得多 |
+| 表格行数 | 3088 | 1067 | **rule 明显少** |
+
+三点需要知道的：
+
+1. **字数差的那 8% 主要不是丢内容，而是表格转 Markdown 的形式差异。** 以
+   `遂信联办〔2024〕7号…通知` 为例：`layout` 把「修复信息类型 / 责任部门 / 咨询电话」
+   那张**无边框**表转成了 GFM 表格（`|` 与 `---` 就占掉三千多字符），`rule` 认不出
+   无边框表，但内容一行没少 —— 变成「`### （三）行政处罚信息修复责任部门` + 正文」。
+2. **表格是 rule 档的真短板**：有框线的走 `page.find_tables()`（纯几何）没问题，
+   无边框表靠启发式（≥3 行 ≥3 列 + 列左边界对齐），命中率有限。**要表格结构完整就用
+   `layout`**。
+3. **标题是「召回换准确」**：rule 多出的标题里既有真层级（`一、` / `（一）` / `3.2`），
+   也有封面、目录、印章碎片这类噪声。`doc2md/pdf_zhdoc.py` 已经把发文字号、成文日期、
+   标准发布/实施日期、纯编号行等明显的噪声挡掉，但做不到 100%。
+
+> ⚠ 两档产出的 md **结构不同**，同一批语料不要混用。
+> 换了引擎后想重转某一类文件：`doc2md run --redo-engine pdf-text`
+> （只清状态库里该引擎的记录，**不删**已产出的 md，重转时覆盖）。
+
+`rule` 档不加载那 49 MB 版面模型，启动也快得多。若**确定不再用 `layout` 档**，可以在
+`doc2md.spec` 里再排掉 `pymupdf4llm` / `onnxruntime` / `numpy` 和模型数据来瘦身 ——
+在那之前不要排，排了 `layout` 档整类 PDF 会转不出来。
 
 ### 关于 `on_collision`（同名冲突）
 
@@ -268,7 +421,7 @@ python -m venv .venv-gui
 
 ### 填 Token 不用手改文件
 
-图形界面里点 **「填写云端 OCR Token…」** 即可（详见上文「图形界面」一节）。
+图形界面里点 **工具栏「设置…」→「云端 OCR Token」页** 即可（详见上文「图形界面」一节）。
 它会写**真正生效的那个** `.env`，保存后当场生效，并且保留文件里原有的注释与
 你自定义的键。命令行侧用 `python -m doc2md env` 查看填写情况（只显示脱敏值）。
 
@@ -292,7 +445,19 @@ python -m venv .venv-gui
 :: 凭据文件读写：保留注释、引号转义、置空删除、写完即时生效
 .venv\Scripts\python.exe tests\test_token_env.py
 
-:: 「填写 Token」对话框端到端（要桌面会话；看不到界面时自动跳过）
+:: 转换清单（convert）：编码探测、缺失项上报、--force 语义、清单驱动不扫 roots
+.venv\Scripts\python.exe tests\test_cli_convert.py
+
+:: 文本型 PDF 的 rule 档接入层（vendor/ZhDocParser 的适配与规则）
+.venv\Scripts\python.exe tests\test_pdf_zhdoc.py
+
+:: 安装程序：提权清单、参数解析、卸载入口（离线，不弹 UAC、不动系统）
+.venv\Scripts\python.exe tests\test_installer_logic.py
+
+:: 卸载程序：沙箱里造一棵同构的安装目录真删一遍；快捷方式/注册表被替换成哑实现
+.venv\Scripts\python.exe tests\test_uninstaller.py
+
+:: 「设置」窗口端到端（含 Token 页、可滚与按钮常驻、引擎选档；要桌面会话，看不到界面时自动跳过）
 .venv-gui\Scripts\python.exe tests\gui_token_smoke.py
 
 :: 全链路冒烟：故意把链路首端设成坏后端，验证熔断切换（联网、会消耗 MinerU 额度）
@@ -327,17 +492,19 @@ dist-installer\doc2md-payload.zip      裸载荷：解压即用的绿色版
 > `dist\doc2md` 里已有 exe 就跳过，安装包内嵌的还是旧构建 —— 表现就是"源码里加了功能、
 > 装出来却没有"。这个坑真踩过：界面上多了「填写云端 OCR Token」，安装版里找不到。
 
-一条命令跑完「应用 → 载荷 → 安装包」：
+一条命令跑完「应用 → 卸载程序 → 载荷 → 安装包」：
 
 | 步骤 | 做什么 |
 |---|---|
 | 1 | PyInstaller + `doc2md.spec` → `dist\doc2md\`（两个 exe 共享 `_internal\`） |
-| 2 | 直接把两个 exe + `_internal\` + `README.md` + `LICENSE` + 示例配置 + `uninstall.bat` 映射进 zip（**无中间暂存目录**，少复制 1000 多个文件） |
-| 3 | 压成 `build\doc2md-payload.zip` |
-| 4 | PyInstaller + `installer\installer.spec` → 单文件安装程序（载荷内嵌其中） |
+| 2 | PyInstaller + `installer\uninstaller.spec` → `build\uninstaller\doc2md-uninstall.exe`（**独立单文件**，卸载时要删 `_internal\`，自己不能依赖它） |
+| 3 | 直接把两个 exe + `uninstall.exe` + `_internal\` + `README.md` + `LICENSE` + 示例配置 + `uninstall.bat` 映射进 zip（**无中间暂存目录**，少复制 1000 多个文件） |
+| 4 | 压成 `build\doc2md-payload.zip` |
+| 5 | PyInstaller + `installer\installer.spec` → 单文件安装程序（载荷内嵌其中） |
 
 > 本机与外发目标都不保证装过 Inno Setup / NSIS / 7-Zip，所以安装程序是
 > **只用 Python 标准库 + PyInstaller 自建的自解压包**，零外部工具依赖。
+> 第 2 步每次都会重打（改 `uninstall_app.py` 不用加 `--force`）；`--force` 只影响第 1 步。
 
 ### 安装程序怎么用
 
@@ -363,11 +530,43 @@ doc2md-安装程序.exe --help
   用户自己挑的普通目录（`D:\doc2md` 之类）本来就可写，不做任何额外放宽。
 - 装完在安装目录生成 `config.json` 与 `.env` 模板，**只补缺、不覆盖**：升级重装不会动你的
   配置、凭据和 `state.db`。
-- **装完第一次打开程序会直接把「填写云端 OCR Token…」窗口弹出来**（因为一个 Token 都
+- **装完第一次打开程序会把「设置」窗口直接开到「云端 OCR Token」页**（因为一个 Token 都
   还没填）。不填也能用 —— 点「稍后再说」，docx / xlsx / 有文字层的 PDF 照常转；这个记号
-  会写进 `.env` 的注释里，之后不再打扰，需要时从菜单或左侧按钮随时再打开。
-- 卸载：安装目录里的 `uninstall.bat`，或「设置 → 应用」里的条目；在 Program Files 下
-  卸载会自动请求提权。
+  会写进 `.env` 的注释里，之后不再打扰，需要时从菜单或工具栏随时再打开。
+- 卸载：安装目录里的 **`uninstall.exe`**（图形界面），或「设置 → 应用」里的条目 ——
+  那条登记项的 `UninstallString` 就指向这个 exe。在 Program Files 下卸载会自动请求提权。
+  详见下一节。
+
+### 卸载
+
+安装目录里的 `uninstall.exe`，「设置 → 应用」里的条目也指向它：
+
+```bat
+uninstall.exe                  :: 图形界面：显示将删除的目录，确认后执行
+uninstall.exe /S               :: 静默（脚本/自动化用）
+uninstall.exe /D=<安装目录>     :: 指定目录（默认取本程序所在目录）
+```
+
+会删掉：安装目录**及其全部内容**（含 `config.json`、`.env`、`state.db`、`logs\`）、
+桌面与开始菜单的快捷方式、「设置 → 应用」的登记项。
+> `state.db` 是断点续传的依据，删掉后重装需要从头重转。要保留就先把
+> `state.db`（以及 `config.json` / `.env`）拷出去。
+
+`uninstall.bat` 仍然保留在同一目录，作为**兜底**（万一 exe 被安全软件拦下）。
+设计上的两个要点：
+
+- **为什么要先把自己复制到 `%TEMP%` 再干活。** Windows 不允许删除正在运行的程序文件，
+  而卸载程序自己就躺在安装目录里 —— 不搬走的话 `uninstall.exe` 删不掉、目录也删不干净。
+  于是启动时先把自己复制到 `%TEMP%\doc2md-uninstall-<pid>.exe` 交给副本（副本由已提权的
+  父进程启动，**不会再弹一次 UAC**），父进程立刻退出，由副本完成删除（**包括目录里的原
+  exe**）。副本自己的文件登记到重启时清理。
+  > **踩过的坑（已实测排除）**：先试的是"把除自己以外都删掉，再交给一个游离的 `cmd`
+  > 循环 `rd /s /q` 延时重试"。**走不通** —— 即使持有句柄的进程已经退出、同一刻在
+  > Python 里 `os.unlink()` 同一个文件**成功**，`rd /s /q` 仍会一直报
+  > 「另一个程序正在使用此文件，进程无法访问」，直到循环跑满都不恢复。
+  > 所以代码里**没有**任何依赖 cmd 延时重试删除的路径，`tests/test_uninstaller.py` 盯着这一点。
+- 代价：`/S` 静默卸载**返回得比较早**（交接完即返回），真正干活的是后台副本，过程写在
+  `%TEMP%\doc2md-uninstall.log`。图形界面模式无感。
 
 ### 安装后目录长什么样
 
@@ -375,6 +574,7 @@ doc2md-安装程序.exe --help
 C:\Program Files\doc2md\
 ├─ doc2md.exe            控制台版（命令行 / 中文菜单）
 ├─ doc2md-gui.exe        窗口版（图形界面）
+├─ uninstall.exe         卸载（图形界面；「设置 → 应用」里的条目也指向它）
 ├─ README.md             ← 完整文档，人和智能体都读这一份
 ├─ LICENSE
 ├─ config.json           首次安装自动生成（来自 config.example.json）
@@ -382,7 +582,7 @@ C:\Program Files\doc2md\
 ├─ .env                  首次安装自动生成（来自 .env.example，值是空的）
 │                        打开程序会提示填 Token，也可以直接编辑本文件
 ├─ .env.example
-├─ uninstall.bat         卸载
+├─ uninstall.bat         卸载兜底脚本（exe 被拦时用）
 └─ _internal\            约 203 MB 运行时（Python / Tk / pymupdf + 49 MB 版面模型 …），别删
 ```
 
@@ -424,6 +624,14 @@ set D=C:\Program Files\doc2md
 > 这一节的基础上再套一层自解压。
 
 目标机器不想装 Python 时，把程序打成独立可执行文件：
+
+> ⚠ **改过任何 `.bat` 之后，先确认行尾是 CRLF。** cmd 遇到 `goto`/标签跳转时按字节偏移
+> 重新定位文件指针，纯 LF 的批处理会让它错位到行中间、**把行的尾巴当命令执行** —— 屏幕上
+> 刷一堆 `'m' 不是内部或外部命令`、`系统找不到指定的文件。`，但**构建照常成功**，只看
+> `[DONE]` 是发现不了的。而且 `.gitattributes` 里的 `*.bat text eol=crlf` **只在 checkout
+> 时生效**：文件被工具重写成 LF 之后，git 归一化比较认为内容相同，`git status` / `git diff`
+> 都看不出问题，能一路混进发布包（`installer/uninstall.bat` 尤其危险，它要跑到用户机上）。
+> `tests\test_packaging_invariants.py` 的第 `[5]` 节会拦住这种文件。
 
 ```bat
 :: 双击 打包EXE.bat 即可；等价命令是：
@@ -520,9 +728,19 @@ datas += collect_data_files("pymupdf", subdir="layout")   # 约 49 MB
 
 > **别拿 `pymupdf` / `onnxruntime` / `numpy` 换体积。** 早期文档写过「在 `excludes`
 > 里加上这三个可省 60 MB」—— 那是错的，而且是**最危险的那种错**：`pymupdf4llm` 1.28
-> 起版面模型**随导入即启用**，`pdf_use_layout=false` 也关不掉它（见
-> `config.example.json` 的说明）。去掉这三样，所有带文字层的 PDF 会当场全部转不出来
-> —— 正是 2026-10-03 那次 292 个失败的原因。要瘦身请往别处想办法。
+> 起版面模型**随导入即启用**，配置里关不掉（`pdf_use_layout` 已废弃、是个单向开关）。
+> 去掉这三样，所有带文字层的 PDF 会当场全部转不出来 —— 正是 2026-10-03 那次 292 个
+> 失败的原因。
+>
+> **唯一正当的瘦身路径是把 `pdf_engine` 定成 `rule`**（纯规则引擎，见「配置要点」），
+> 让它不再需要这条链路 —— `rule` 档不 import `pymupdf4llm`，也就永远不加载
+> onnxruntime。此时可以同时做两件事：
+> ① `doc2md.spec` 的 `excludes` 里加上 `onnxruntime`、`numpy`；
+> ② 删掉那行 `collect_data_files("pymupdf", subdir="layout")`。
+> 两处都做完，`_internal\` 瘦掉约 **106 MB**（49 MB 模型 + 36 MB onnxruntime +
+> 21 MB numpy.libs），安装包从 118 MB 降到 40 MB 上下。
+> **只做一半不行** —— 只删 `collect_data_files` 却不切 `rule`，就正好踩回上面那个
+> 292 失败的坑。
 
 **注意别把 `tkinter` 加进 `excludes`**，否则窗口版会启动即崩。
 

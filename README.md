@@ -319,7 +319,7 @@ python -m venv .venv-gui
 .venv-gui\Scripts\python.exe make_installer.py --force
 
 :: 产物
-dist-installer\doc2md-安装程序.exe     ≈ 84 MB，就一个文件
+dist-installer\doc2md-安装程序.exe     ≈ 118 MB，就一个文件
 dist-installer\doc2md-payload.zip      裸载荷：解压即用的绿色版
 ```
 
@@ -383,7 +383,7 @@ C:\Program Files\doc2md\
 │                        打开程序会提示填 Token，也可以直接编辑本文件
 ├─ .env.example
 ├─ uninstall.bat         卸载
-└─ _internal\            约 155 MB 运行时（Python / Tk / pymupdf …），别删
+└─ _internal\            约 203 MB 运行时（Python / Tk / pymupdf + 49 MB 版面模型 …），别删
 ```
 
 ### 供自动化 / 智能体（LLM harness）调用
@@ -439,13 +439,47 @@ set D=C:\Program Files\doc2md
 | `doc2md-gui.exe` | 图形界面 | 窗口版；`--menu` 可强制走菜单 |
 
 两者**共享同一个 `_internal\` 目录** —— 一份 `Analysis`/`PYZ` 造两个 `EXE` 对象
-再一起 `COLLECT`，所以多带一个窗口版只多几 MB，不是把 130 多 MB 再复制一份。
+再一起 `COLLECT`，所以多带一个窗口版只多几 MB，不是把 203 MB 再复制一份。
 各自的显式开关：`doc2md.exe --gui` 走界面，`doc2md-gui.exe --menu` 走菜单。
 
 > **必须用带 tkinter 的解释器打包。** PyInstaller 只能打包**构建解释器实际拥有**的
 > 东西；用精简版 Python 3.13 打包，`tkinter` 根本不会被打进去，而**打包时不会报错**，
 > 只在用户双击 `doc2md-gui.exe` 时才崩。所以 `doc2md.spec` 开头加了一道前置自检，
 > 没有 tkinter 就直接中止并提示改用 `.venv-gui`；`打包EXE.bat` 也会优先挑 `.venv-gui`。
+
+### 打包最容易漏的东西：第三方库的数据文件
+
+PyInstaller 只做**静态分析**。import 链它跟得住，但第三方包**运行时才去读**的
+数据文件必须显式声明 —— 否则打出来的包看着一切正常，跑起来才炸。本项目踩过一次
+大的：一次全量跑，3809 个文件里 **292 个失败**。
+
+```
+FileNotFoundError: ...\_internal\pymupdf\layout/resources/onnx/layout_rf2.4.1+imf1.yaml
+AttributeError: module 'pymupdf4llm' has no attribute 'to_markdown'
+```
+
+`pymupdf-layout` 是个**独立的发行包**，它不经 pip 的常规路径落文件，而是把版面
+模型直接塞进 `pymupdf/layout/` 目录里。PyInstaller 按 `pymupdf` 自己的清单收集，
+看不见这些「外来」文件 —— 于是 `import pymupdf4llm` 时
+`pymupdf.layout.activate()` → `BoxRFDGNN.__init__` 一 `open()` 模型 YAML 就失败。
+后果是**所有带文字层的 PDF 全部转不出来**（那 292 个正好是 `pdf_text` 一整类）。
+
+那 27 个报 `AttributeError` 的是**同一个根因的另一种表现**：首次导入失败后，半初始
+化的模块被留在 `sys.modules` 里，第二次访问就成了「没有这个属性」。看到两种毫不
+相干的报错混在一起，先怀疑是不是同一个底层故障。
+
+修复就一行（`doc2md.spec`）：
+
+```python
+datas += collect_data_files("pymupdf", subdir="layout")   # 约 49 MB
+```
+
+**不要只挑几个 `.onnx` 图省事**：表格网格模型有 10 个版本、feature_set 有 3 种组合，
+少一个就是某一类版面在运行期静默失败 —— 正是这次要修掉的故障形态。
+
+> 排查同类问题的手法：拿**源码态**和**打包态**跑同一个文件，行为不一致就往数据
+> 文件上想。反过来说，`python -c "import 某库"` 在源码里成功、在 exe 里失败，
+> 也是同一个信号。
 
 ### 分发时的目录约定
 
@@ -468,31 +502,51 @@ set D=C:\Program Files\doc2md
 
 ### 体积
 
-实测（PyInstaller 6.22 / Python 3.11 / onedir）：**约 155 MB、约 1030 个文件**，
-其中两个 exe 各约 11 MB，其余全在 `_internal\`：
+实测（PyInstaller 6.22 / Python 3.12 / onedir，2026-10-03）：**约 203 MB、1039 个
+文件**，其中两个 exe 各约 10 MB，其余全在 `_internal\`：
 
 | 内容 | 体积 | 说明 |
 |---|---|---|
-| `pymupdf` | 38 MB | PDF 渲染与文本层抽取，必需 |
-| `onnxruntime` | 36 MB | 只有 `pdf_use_layout=true`（ONNX 版面模型）才用得到 |
-| `numpy`（含 `numpy.libs`） | 27 MB | 同上，是 onnxruntime 的依赖 |
+| `pymupdf` | 87 MB | PDF 渲染 + 文本层抽取；**其中 49 MB 是 `layout/` 下的 ONNX 版面模型**，见上一节 |
+| `onnxruntime` | 36 MB | 跑上面那个版面模型用的推理引擎 |
+| `numpy`（含 `numpy.libs`） | 27 MB | onnxruntime 的依赖 |
 | `libcrypto` / `libssl` | 9 MB | `requests` 的 TLS，云端 OCR 必需 |
-| tkinter 运行时 | 8 MB | `_tkinter.pyd` + `tcl86t`/`tk86t` + tcl/tk 数据，**文件数的大头是这里的 830 个小文件** |
-| 其余 | 约 37 MB | `python311.dll`、`pywin32`、`sqlite3` 等 |
+| tkinter 运行时 | 9 MB | `_tkinter.pyd` + `tcl86t`/`tk86t` + tcl/tk 数据，**文件数的大头是这里的小文件** |
+| `python312.dll` + `base_library.zip` | 8 MB | 解释器本体 |
+| 其余 | 约 27 MB | `pywin32`、`sqlite3.dll`、`charset_normalizer` 等 |
 
-窗口版只多占几 MB —— 两个 exe **共享同一个 `_internal\`**，不是把 155 MB 复制一份。
+窗口版只多占几 MB —— 两个 exe **共享同一个 `_internal\`**，不是把 203 MB 复制一份。
+单文件安装包 `doc2md-安装程序.exe` 是 **118 MB**（载荷 203 MB 压到 109 MB）。
 
-**想更小**：在 `doc2md.spec` 的 `excludes` 里加上 `onnxruntime`、`numpy`、`pymupdf_layout`，
-可再省约 **63 MB**（155 → 92 MB）。代价是 `pdf_use_layout=true` 不再可用；
-该选项默认关闭、本项目配置也一直是关的，所以日常使用不受影响。
+> **别拿 `pymupdf` / `onnxruntime` / `numpy` 换体积。** 早期文档写过「在 `excludes`
+> 里加上这三个可省 60 MB」—— 那是错的，而且是**最危险的那种错**：`pymupdf4llm` 1.28
+> 起版面模型**随导入即启用**，`pdf_use_layout=false` 也关不掉它（见
+> `config.example.json` 的说明）。去掉这三样，所有带文字层的 PDF 会当场全部转不出来
+> —— 正是 2026-10-03 那次 292 个失败的原因。要瘦身请往别处想办法。
 
-> 这个体积是上一轮实测的历史数据；换成完整 Python 后因为多了 tcl/tk、
-> `numpy`/`onnxruntime` 等，数字会略变，以实际构建为准。
+**注意别把 `tkinter` 加进 `excludes`**，否则窗口版会启动即崩。
 
-想更小可在 `doc2md.spec` 的 `excludes` 里加上 `onnxruntime` 与 `numpy`
-（约省 60 MB），代价是 `pdf_use_layout=true`（ONNX 版面模型）不再可用 ——
-该选项默认就是关闭的，本项目配置也保持关闭。**注意别把 `tkinter` 加进
-`excludes`**，否则窗口版会启动即崩。
+### 控制台报错却看不到错误：先把编码放宽
+
+Windows 控制台默认 GBK，而界面文案里用了 `⭐ ⚠ ↳ ↔ ✓ ✗ ⊘` 这类符号。一行
+`print("⭐ ...")` 编不进 GBK 就抛 `UnicodeEncodeError` —— 更糟的是它发生在
+**打印报错信息的那一刻**：引擎要打 `      ↳ FileNotFoundError: ...`，`↳` 编不出去，
+异常盖住了原始异常，屏幕上只剩：
+
+```
+[PYI-21272:ERROR] Failed to execute script 'app' due to unhandled exception!
+```
+
+查一个「文本层 PDF 全失败」的问题，却被引去翻编码，白绕一圈。（`文档转MD.bat`
+双击走控制台菜单，菜单里正好有个 `⭐`，所以这条路以前是**必崩**的。）
+
+现在四个入口 —— `app.py`（打包入口）、`launcher.py`（bat 直接调它，绕过 app.py）、
+`cli.py`、`gui.py` —— 都在做第一件事时调 `doc2md.stdio.make_stdio_safe()`，把
+`stdout` / `stderr` 的错误策略放宽成 `replace`：编不出的字符显示成 `?`，但绝不抛
+异常、绝不掩盖原始错误。顺带把 `launcher.MENU` 里的 `⭐` 换成了 GBK 里有的 `★`。
+
+> 单独做成 `doc2md/stdio.py` 而不是塞进 `cli.py`：后者会顺手把整个引擎拖进来，
+> 图形界面「秒开」就没了。
 
 ### 打包适配了什么
 
@@ -510,6 +564,12 @@ set D=C:\Program Files\doc2md
   的 `stdout` 不是真实句柄，据此认出自己该开图形界面。
 - `engine.py` 多了一个可选的 `should_stop` 回调（GUI 的「停止」按钮用），
   CLI 不传就是 `None`，行为与以前完全一致。
+- 四个入口 `app.py` / `launcher.py` / `cli.py` / `gui.py` 都先调
+  `doc2md.stdio.make_stdio_safe()` 再输出（原因见上一节）。
+- `make_installer.py` 重建前把 `dist\doc2md` 与 PyInstaller 的 `workpath`
+  **改名挪开**而不是删除：装了终端安全软件的机器会拦截「一次删上千个文件」，
+  PyInstaller 自己清目录时会撞上、构建当场中止；改名只动目录项，又快又稳。
+  挪开的东西统一带 `.old-<时间戳>` 后缀，攒多了集中清理即可。
 
 ---
 

@@ -38,6 +38,7 @@ from .config import (
 )
 from .engine import Engine
 from .state import StateStore
+from .stdio import make_stdio_safe
 
 
 def _install_thread_guard() -> None:
@@ -416,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    make_stdio_safe()
     _install_thread_guard()
     parser = build_parser()
     args = parser.parse_args(argv)

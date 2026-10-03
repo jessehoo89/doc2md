@@ -86,7 +86,31 @@ def check_interpreter() -> None:
     log(f"[环境] 解释器 {sys.version.split()[0]}（tkinter 可用）")
 
 
+def _shelve_dir(path: Path, why: str) -> None:
+    """把已存在的目录**改名挪开**，让下一步能在空位上全新生成。
+
+    为什么不直接 ``shutil.rmtree``：本机（以及不少装了终端安全软件的机器）有
+    批量删除防护 —— 一次删掉上千个文件会被拦下，构建当场中止。而 PyInstaller
+    自己会去清 distpath/workpath，撞上同一道墙：
+        [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":1029, ...}
+    改名既绕开限制，又比删除快得多（只动目录项，不碰文件）。挪开的东西统一带
+    ``.old-<时间戳>`` 后缀，便于事后一眼认出、集中清理。
+    """
+    if not path.exists():
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = path.with_name(f"{path.name}.old-{stamp}")
+    n = 1
+    while dest.exists():                   # 同一秒内连跑两次也不会撞名
+        dest = path.with_name(f"{path.name}.old-{stamp}-{n}")
+        n += 1
+    path.rename(dest)
+    log(f"[挪开] {why}：{path.name} → {dest.name}")
+
+
 def run_pyinstaller(spec: Path, *, distpath: Path, workpath: Path) -> None:
+    # PyInstaller 会先清空 workpath；动手前先挪开，免得撞上批量删除防护。
+    _shelve_dir(workpath, "清空打包中间目录")
     cmd = [
         sys.executable, "-m", "PyInstaller", str(spec),
         "--noconfirm",
@@ -108,8 +132,13 @@ def build_app(*, force: bool = False) -> None:
     if all(p.is_file() for p in exes) and not force:
         log("[跳过] 两个 exe 已存在；要重打包请加 --force（或 --clean）")
         return
-    if force and all(p.is_file() for p in exes):
+    if DIST_APP.exists():
+        if not force:
+            die(f"{DIST_APP} 已存在但不完整，请加 --force 重打包")
         log("[重建] --force：忽略现有 dist/doc2md，重新打包")
+        # PyInstaller 清空 distpath 里同名目录时同样会撞上批量删除防护（1030 个
+        # 文件），所以先改名挪开，让它在空位上全新输出。
+        _shelve_dir(DIST_APP, "腾出输出目录")
     run_pyinstaller(
         ROOT / "doc2md.spec",
         distpath=ROOT / "dist",

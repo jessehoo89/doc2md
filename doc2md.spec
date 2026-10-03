@@ -29,7 +29,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).resolve()          # noqa: F821  (SPECPATH 由 PyInstaller 注入)
 
@@ -52,6 +52,25 @@ for extra in (".env.example", "README.md"):
     p = ROOT / extra
     if p.exists():
         datas.append((str(p), "."))
+
+# ---- 版面模型（49MB，必须带）------------------------------------------------
+# `pymupdf-layout` 是个**独立的发行包**，它不经 pip 的常规路径落文件，而是直接
+# 把版面模型塞进 `pymupdf/layout/` 目录里。PyInstaller 只按 `pymupdf` 自己的
+# 清单收集二进制，看不见这些"外来的"数据文件 —— 打出来的包看着正常，一跑
+# `import pymupdf4llm` 就炸：
+#
+#     pymupdf4llm/__init__.py:52  →  pymupdf.layout.activate()
+#       →  BoxRFDGNN.__init__  open('.../resources/onnx/layout_rf2.4.1+imf1.yaml')
+#       →  FileNotFoundError
+#
+# 后果是**所有带文字层的 PDF 全部转不出来**。实测全量语料 3809 个文件里
+# pdf_text 那一类 292 个全灭（另有 27 个报的是 AttributeError —— 半初始化的
+# 模块被留在 sys.modules 里，同一个根因的另一种表现）。
+#
+# 不要试图只挑几个 .onnx「够用就行」：BoxRFDGNN 的表格网格模型有 10 个版本
+# （V1/V1A/V1T/V2/V2A/V2B/V3/V4/V1T-A/V1T-B），feature_set 也有 3 种组合，
+# 少一个就是某一类版面在运行期静默失败 —— 正是这次要修掉的故障形态。
+datas += collect_data_files("pymupdf", subdir="layout")
 
 # ---- 静态分析容易漏掉的导入 ----
 hiddenimports = [

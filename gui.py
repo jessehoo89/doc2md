@@ -66,6 +66,7 @@ from doc2md.config import (          # noqa: E402  （config/state 都是轻量�
     token_prompt_dismissed,
 )
 from doc2md.state import StateStore   # noqa: E402
+from doc2md.stdio import make_stdio_safe   # noqa: E402
 
 APP_TITLE = "文档批量转 Markdown"
 APP_VERSION = "1.0.0"
@@ -1486,6 +1487,7 @@ class Doc2MdApp:
 
 def main(config_path: str | Path | None = None) -> int:
     _guard_stdio()
+    make_stdio_safe()                     # 没有控制台时也不能因编码把首启日志搞崩
     try:                                  # 与命令行版一致：静音 pymupdf4llm 的编码噪音
         from doc2md.cli import _install_thread_guard
 

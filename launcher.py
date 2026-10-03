@@ -19,6 +19,8 @@ TOOL_DIR = (
 )
 sys.path.insert(0, str(TOOL_DIR))
 
+from doc2md.stdio import make_stdio_safe   # noqa: E402  （要放在 sys.path 之后）
+
 MENU = """
 ================================================================================
                         文档批量转 Markdown
@@ -27,7 +29,7 @@ MENU = """
   扫描件（无文字层）自动调用 PaddleOCR 云端识别
   敏感目录（个人资料等）已配置为不上传云端
 
-    [G]  打开图形界面 ⭐         窗口版操作界面（按钮点选，功能与本菜单完全一样）
+    [G]  打开图形界面 ★         窗口版操作界面（按钮点选，功能与本菜单完全一样）
     [1]  扫描 / 试运行          看看有多少文件、走哪条通道（不写任何文件）
     [2]  开始批量转换            全量转换，中断后重跑会自动续传
     [3]  启动实时监控            常驻监控新增和修改的文件，自动转换
@@ -163,6 +165,7 @@ def _open_gui() -> None:
 
 
 def main() -> int:
+    make_stdio_safe()      # 菜单里有装饰符号，先把编码策略放宽再 print
     while True:
         os.system("cls" if os.name == "nt" else "clear")
         print(MENU)

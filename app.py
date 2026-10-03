@@ -18,6 +18,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from doc2md.stdio import make_stdio_safe
+
 
 def _is_windowed_build() -> bool:
     """打包成 console=False 的窗口版时，PyInstaller 不会挂真实的 stdout。
@@ -54,6 +56,10 @@ def _prefer_gui() -> bool:
 
 
 def main() -> int:
+    # 第一件事：把控制台的编码策略放宽。必须在任何 print 之前 —— 尤其是
+    # 打包版报错的那一刻，否则一个编不出的装饰字符会把原始异常顶掉。
+    make_stdio_safe()
+
     argv = list(sys.argv[1:])
     force_gui = "--gui" in argv
     force_menu = "--menu" in argv

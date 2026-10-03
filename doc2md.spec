@@ -2,8 +2,16 @@
 """PyInstaller 打包配置 —— doc2md（文档批量转 Markdown）。
 
 用法（在项目根，用**带 tkinter 的那个解释器**）：
-    .venv-gui\\Scripts\\python.exe -m PyInstaller doc2md.spec --noconfirm
-或直接双击 打包EXE.bat（它会自动优先挑 .venv-gui）。
+    Windows:  .venv-gui\Scripts\python.exe -m PyInstaller doc2md.spec --noconfirm
+              或直接双击 打包EXE.bat（它会自动优先挑 .venv-gui）
+    Linux:    bash build_linux.sh   （.venv/bin/python -m PyInstaller doc2md.spec --noconfirm）
+              解释器没有 tkinter 时只打控制台版 doc2md，跳过窗口版
+
+单文件形态（便于分发：一个可执行文件拷走即用）：
+    DOC2MD_ONEFILE=1 python -m PyInstaller doc2md.spec --noconfirm --distpath dist-onefile
+    或  bash build_linux.sh onefile
+    产物 dist-onefile/doc2md 是一个自解压可执行文件；代价是每次启动要把内置
+    资源解包到临时目录（慢若干秒、占 /tmp），故只出控制台版。
 
 产物：dist/doc2md/ 整个文件夹，里面有两个 exe：
     doc2md.exe       控制台版 —— 双击进中文菜单，带参数等价于 python -m doc2md
@@ -26,6 +34,7 @@
      本地 RapidOCR 也仍需那套独立解释器（config.json 里 local_ocr.python_exe）。
      这两项打不进去，属能力边界而非缺陷。
 """
+import os
 import sys
 from pathlib import Path
 
@@ -34,17 +43,23 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = Path(SPECPATH).resolve()          # noqa: F821  (SPECPATH 由 PyInstaller 注入)
 
 # ---- 前置自检：没有 tkinter 就别往下走了，早报错好过运行时才炸 ---------------
+HAS_TK = True
 if sys.version_info >= (3, 11):
     try:
         import tkinter  # noqa: F401
     except ImportError:
-        raise SystemExit(
-            "\n[打包中止] 当前解释器没有 tkinter，窗口版打包出来会启动即崩。\n"
-            f"  当前解释器：{sys.executable}\n"
-            "  改用带 tkinter 的解释器，例如：\n"
-            f'    "{ROOT}\\.venv-gui\\Scripts\\python.exe" -m PyInstaller doc2md.spec --noconfirm\n'
-            "  （项目自带的 .venv 是精简 Python，没有 tkinter）\n"
-        )
+        HAS_TK = False
+        if sys.platform == "win32":
+            raise SystemExit(
+                "\n[打包中止] 当前解释器没有 tkinter，窗口版打包出来会启动即崩。\n"
+                f"  当前解释器：{sys.executable}\n"
+                "  改用带 tkinter 的解释器，例如：\n"
+                f'    "{ROOT}\\.venv-gui\\Scripts\\python.exe" -m PyInstaller doc2md.spec --noconfirm\n'
+                "  （项目自带的 .venv 是精简 Python，没有 tkinter）\n"
+            )
+        # Linux/macOS：命令行是主用法，缺 tkinter 只跳过窗口版，不阻断打包。
+        # 想连窗口版一起打：apt install python3-tk（或 brew install python-tk）。
+        print("[提示] 解释器没有 tkinter，本次只打控制台版 doc2md，跳过窗口版 doc2md-gui。")
 
 # ---- 随程序一起带走的非代码文件 ----
 datas = [(str(ROOT / "config.example.json"), ".")]
@@ -74,20 +89,32 @@ datas += collect_data_files("pymupdf", subdir="layout")
 
 # ---- 静态分析容易漏掉的导入 ----
 hiddenimports = [
-    # pywin32：.doc/.xls 的 COM 转换，是在函数内部 import 的
-    "win32com", "win32com.client", "win32com.client.dynamic",
-    "pythoncom", "pywintypes", "win32timezone",
-    # watchdog：Windows 下按平台动态挑 observer 实现
-    "watchdog.observers.winapi",
-    "watchdog.observers.read_directory_changes",
     # 核心第三方库显式列出，避免被误判为未使用
     "pymupdf", "pymupdf4llm", "mammoth", "markdownify",
     "openpyxl", "xlrd", "requests", "bs4",
 ]
+if sys.platform == "win32":
+    hiddenimports += [
+        # pywin32：.doc/.xls 的 COM 转换，是在函数内部 import 的
+        "win32com", "win32com.client", "win32com.client.dynamic",
+        "pythoncom", "pywintypes", "win32timezone",
+        # watchdog：Windows 下按平台动态挑 observer 实现
+        "watchdog.observers.winapi",
+        "watchdog.observers.read_directory_changes",
+    ]
+else:
+    # 非 Windows：老式 .doc/.xls 走 LibreOffice soffice（不再 import pywin32），
+    # watchdog 在 POSIX 下用 inotify / kqueue / polling observer。
+    hiddenimports += [
+        "watchdog.observers.inotify",
+        "watchdog.observers.polling",
+    ]
 # 本包自己的模块：gui.py 里是「用到才 import」的（为了让窗口秒开），
 # 静态分析对函数体内的 import 不够稳，直接整包收进来最省心。
 hiddenimports += collect_submodules("doc2md")
-hiddenimports += ["gui", "launcher"]
+hiddenimports += ["launcher"]
+if HAS_TK:
+    hiddenimports += ["gui"]
 
 # ---- vendor 子项目：ZhDocParser（纯规则 PDF 结构还原）------------------------
 # 两件必须做的事，少一件打出来的包就跑不了 rule 档：
@@ -137,51 +164,84 @@ a = Analysis(
 
 pyz = PYZ(a.pure)                        # noqa: F821
 
-# ---- 控制台版：菜单 + 命令行 ------------------------------------------------
-exe = EXE(                               # noqa: F821
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="doc2md",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,                           # 不依赖本机装 UPX
-    console=True,                        # 菜单/日志都要能看到，必须带控制台
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+# ---- 打包形态：onedir（默认）/ onefile（单文件）------------------------------
+# onedir：exe + _internal/，启动最快，与 Windows 版一致。
+# onefile：依赖与内置资源全部打进单个可执行文件，便于整包分发；代价是每次
+#   启动都要把内容解包到临时目录（_MEIPASS，退出即删），启动慢若干秒、占 /tmp。
+#   为免体积翻倍，单文件模式只出控制台版。
+ONEFILE = os.environ.get("DOC2MD_ONEFILE", "").strip().lower() not in ("", "0", "false", "no")
 
-# ---- 窗口版：双击直接开图形界面 --------------------------------------------
-exe_gui = EXE(                           # noqa: F821
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="doc2md-gui",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,                       # 不要黑窗口
-    disable_windowed_traceback=False,    # 崩了弹窗显示 traceback，好排查
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+if ONEFILE:
+    # ---- 单文件：只出一个控制台可执行文件 ----
+    # 程序目录仍按 sys.executable 解析（不是 _MEIPASS），所以 config.json /
+    # .env / state.db 依旧落在可执行文件旁边，随文件搬走。
+    exe = EXE(                           # noqa: F821
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="doc2md",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,                    # 菜单/日志都要能看到，必须带控制台
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
+else:
+    # ---- 控制台版：菜单 + 命令行 ----
+    exe = EXE(                           # noqa: F821
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="doc2md",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,                       # 不依赖本机装 UPX
+        console=True,                    # 菜单/日志都要能看到，必须带控制台
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
 
-coll = COLLECT(                          # noqa: F821
-    exe,
-    exe_gui,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="doc2md",
-)
+    # ---- 窗口版：双击直接开图形界面（解释器没有 tkinter 时跳过）--------------
+    if HAS_TK:
+        exe_gui = EXE(                       # noqa: F821
+            pyz,
+            a.scripts,
+            [],
+            exclude_binaries=True,
+            name="doc2md-gui",
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=False,
+            console=False,                   # 不要黑窗口
+            disable_windowed_traceback=False,  # 崩了弹窗显示 traceback，好排查
+            argv_emulation=False,
+            target_arch=None,
+            codesign_identity=None,
+            entitlements_file=None,
+        )
+        collected = [exe, exe_gui]
+    else:
+        collected = [exe]
+
+    coll = COLLECT(                      # noqa: F821
+        *collected,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="doc2md",
+    )
